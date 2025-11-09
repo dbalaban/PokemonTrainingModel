@@ -185,7 +185,29 @@ class SpeciesInfo:
             return int(5 * level**3 / 4)
 
         raise ValueError("Unknown growth rate")
+    
+    def exp_bin_search(self, exp: int, low: int = 1, high: int = 101) -> int:
+        """
+        Given an EXP amount, find the corresponding level using binary search.
+        Assumes levels are in [low, high).
+        """
+        if (high == low + 1):
+            return low
+        mid = (low + high) // 2
+        mid_exp = self.exp_to_level(mid)
+        if mid_exp < exp:
+            return self.exp_bin_search(exp, mid, high)
+        elif mid_exp > exp:
+            return self.exp_bin_search(exp, low, mid)
+        else:
+            return mid
 
+    def level_from_exp(self, exp: int) -> int:
+        """
+        Given an EXP amount, find the corresponding level.
+        Uses binary search over levels 1–100.
+        """
+        return self.exp_bin_search(exp)
 
 # =====================
 # EXP yield for KOs
@@ -203,12 +225,12 @@ class TargetPokemonSpecies:
     species_name: str
     base_exp_yield: int
     ev_yield: StatBlock
+    is_trainer_owned: bool
 
     def get_exp_yield_flat(
         self,
         fainted_level: int,
         gen: int,
-        is_trainer_owned: bool,
     ) -> int:
         """
         Flat EXP formula:
@@ -223,7 +245,7 @@ class TargetPokemonSpecies:
           - single recipient
           - no Exp Share / Lucky Egg / traded / etc.
         """
-        a = 1.5 if is_trainer_owned else 1.0
+        a = 1.5 if self.is_trainer_owned else 1.0
         numer = a * fainted_level * self.base_exp_yield
 
         if gen == 6:
@@ -235,7 +257,6 @@ class TargetPokemonSpecies:
         fainted_level: int,
         winner_level: int,
         gen: int,
-        is_trainer_owned: bool,
     ) -> int:
         """
         Scaled EXP formula skeleton:
@@ -249,7 +270,7 @@ class TargetPokemonSpecies:
           - single recipient
           - no Exp Share / Lucky Egg / traded / etc.
         """
-        a = 1.5 if is_trainer_owned else 1.0
+        a = 1.5 if self.is_trainer_owned else 1.0
         base = int(a * fainted_level * self.base_exp_yield / 5)
 
         X = 2 * fainted_level + 10
@@ -305,6 +326,13 @@ class EncounterOption:
     level_min: int
     level_max: int
 
+@dataclass
+class Encounter:
+    """
+    An actual encounter instance, with chosen level.
+    """
+    target: TargetPokemonSpecies
+    level: int
 
 @dataclass
 class TrainingBlock:
