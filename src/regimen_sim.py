@@ -3,6 +3,8 @@ import numpy as np
 from random import random
 from data_structures import *
 
+from matplotlib import pyplot as plt
+
 class RegimenSimulator:
     def __init__(self, regimen: TrainingRegimen, species: SpeciesInfo, gen: int):
         self.regimen = regimen
@@ -63,3 +65,30 @@ class RegimenSimulator:
         mean_block = StatBlock(*means.astype(int))
         stddev_block = StatBlock(*stddevs.astype(int))
         return mean_block, stddev_block
+    
+    def plot_ev_distributions(self):
+        ev_array = np.array([[sample.hp, sample.atk, sample.def_, sample.spa, sample.spd, sample.spe] for sample in self.samples])
+        stat_names = ['HP', 'Attack', 'Defense', 'Special Attack', 'Special Defense', 'Speed']
+        
+        # define colors for each stat
+        colors = {'HP': 'red', 'Attack': 'blue', 'Defense': 'green',
+                  'Special Attack': 'purple', 'Special Defense': 'orange', 'Speed': 'cyan'}
+
+        # exclude stats with zero gain across all samples
+        non_zero_indices = np.where(ev_array.sum(axis=0) > 0)[0]
+        ev_array = ev_array[:, non_zero_indices]
+        stat_names = [stat_names[i] for i in non_zero_indices]
+        num_stats = len(stat_names)
+
+        # overlay histograms for each stat
+        plt.figure(figsize=(10, 6))
+        bins = 30
+        for i in range(num_stats):
+            plt.hist(ev_array[:, i], bins=bins, alpha=0.5, label=stat_names[i], color=colors[stat_names[i]])
+        plt.xlabel('EV Gain')
+        plt.ylabel('Frequency')
+        plt.title('EV Gain Distributions')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
