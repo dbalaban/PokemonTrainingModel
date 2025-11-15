@@ -60,7 +60,7 @@ class StatBlock:
         """
         return StatBlock(
             hp=self.hp - other.hp,
-            attack=self.attack - other.attack,
+            atk=self.atk - other.atk,
             def_=self.def_ - other.def_,
             spa=self.spa - other.spa,
             spd=self.spd - other.spd,

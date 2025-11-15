@@ -114,5 +114,6 @@ class RegimenSimulator:
         plt.title('EV Gain Distributions')
         plt.legend()
         plt.grid(True)
-        plt.show()
+        plt.savefig('ev_distributions.png')
+        plt.close()
 

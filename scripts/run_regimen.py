@@ -50,7 +50,7 @@ Machop = SpeciesInfo(
 Ponyta = SpeciesInfo(
     name="Ponyta",
     base_stats=StatBlock(hp=50, atk=85, def_=55, spa=65, spd=65, spe=90),
-    ev_yield=StatBlock(hp=0, atk=0, def_=0, spa=1, spd=0, spe=0),
+    ev_yield=StatBlock(hp=0, atk=0, def_=0, spa=0, spd=0, spe=1),
     base_exp_yield=82,
     growth_rate=GrowthRate.MEDIUM_FAST
 )
