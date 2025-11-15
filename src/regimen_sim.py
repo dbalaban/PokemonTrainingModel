@@ -2,6 +2,7 @@ import numpy as np
 
 from random import random
 from data_structures import *
+from PMFs import EV_PMF
 
 from matplotlib import pyplot as plt
 
@@ -42,7 +43,7 @@ class RegimenSimulator:
             exp += exp_gain
             ev_gains += ev_gain
         return exp, ev_gains
-    
+
     def simulate_trial(self, exp_start: int = 0) -> StatBlock:
         exp = exp_start
         total_ev_gains = StatBlock(0, 0, 0, 0, 0, 0)
@@ -50,22 +51,47 @@ class RegimenSimulator:
             exp, ev_gains = self.simulateBlock(block, exp)
             total_ev_gains += ev_gains
         return total_ev_gains
-    
+
     def run_simulation(self, num_trials: int, exp_start: int = 0) -> List[StatBlock]:
         self.samples = []
         for _ in range(num_trials):
             ev_gains = self.simulate_trial(exp_start)
             self.samples.append(ev_gains)
         return self.samples
-    
-    def get_ev_stats(self) -> tuple[StatBlock, StatBlock]:
+
+    def get_ev_stats(self) -> EV_PMF:
+        if len(self.samples) == 0:
+            raise ValueError("No samples available. Run simulation first.")
+
         ev_array = np.array([[sample.hp, sample.atk, sample.def_, sample.spa, sample.spd, sample.spe] for sample in self.samples])
-        means = np.mean(ev_array, axis=0)
-        stddevs = np.std(ev_array, axis=0)
-        mean_block = StatBlock(*means.astype(int))
-        stddev_block = StatBlock(*stddevs.astype(int))
-        return mean_block, stddev_block
-    
+        max_ev = 252
+        n_stats = 6
+        max_total_ev = 2 * max_ev + n_stats
+
+        # Compute histogram for total EVs
+        total_evs = ev_array.sum(axis=1)
+        T_hist, _ = np.histogram(total_evs, bins=np.arange(0, max_total_ev + 2), density=True)
+
+        # Compute histograms for W given T
+        W_hist = np.zeros((5, 506))
+        for sample in ev_array:
+            total_ev = sample.sum()
+            # corners [6x6] cols are the vertices for this total_ev
+            corners = EV_PMF().get_corners(total_ev)
+            # find the linear combination of corners that gives sample
+            weights = np.linalg.pinv(corners.T).dot(sample)
+            # enforce sum of weights = 1
+            weights = weights / weights.sum()
+            # 6th weight is redundant, map weights to bin indices
+            bin_indices = np.floor(weights[:-1] * 506).astype(int)
+            W_hist[:, bin_indices] += 1
+
+        # convert frequencies to probabilities
+        W_hist = W_hist / W_hist.sum(axis=1, keepdims=True)
+        T_hist = T_hist / T_hist.sum()
+
+        return EV_PMF(priorT=T_hist, priorW=W_hist)
+
     def plot_ev_distributions(self):
         ev_array = np.array([[sample.hp, sample.atk, sample.def_, sample.spa, sample.spd, sample.spe] for sample in self.samples])
         stat_names = ['HP', 'Attack', 'Defense', 'Special Attack', 'Special Defense', 'Speed']
