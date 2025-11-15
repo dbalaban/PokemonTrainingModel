@@ -18,10 +18,7 @@ class RegimenSimulator:
         rates = rates / rates.sum()
         opetion_choice = np.random.choice(len(encounters), p=rates)
 
-        level_choice = np.random.randint(
-            encounters[opetion_choice].level_min,
-            encounters[opetion_choice].level_max + 1
-        )
+        level_choice = np.random.choice(encounters[opetion_choice].levels)
 
         return Encounter(
             target=encounters[opetion_choice].target,
@@ -29,6 +26,7 @@ class RegimenSimulator:
         )
 
     # Simulate a single training block, returning the resulting experience and EV gains.
+    # TODO: create datatype for EVStats that enforce maximums, use instead of StatBlock
     def simulateBlock(self, block: TrainingBlock, exp_start: int) -> tuple[int, StatBlock]:
         # ensure the exp_start is valid for the block's starting level
         assert block.start_level == self.species.level_from_exp(exp_start)

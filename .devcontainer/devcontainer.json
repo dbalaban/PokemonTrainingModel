@@ -1,0 +1,12 @@
+{
+  "name": "Set PYTHONPATH for Codespace",
+  "containerEnv": {
+    "PYTHONPATH": "${containerWorkspaceFolder}/src:${PYTHONPATH}"
+  },
+  "postCreateCommand": "bash -lc 'echo \"export PYTHONPATH=\\\"${containerWorkspaceFolder}/src:$PYTHONPATH\\\"\" >> ~/.bashrc || true'",
+  "customizations": {
+    "vscode": {
+      "extensions": []
+    }
+  }
+}

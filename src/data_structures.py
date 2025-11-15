@@ -323,8 +323,7 @@ class EncounterOption:
     """
     target: TargetPokemonSpecies
     weight: float
-    level_min: int
-    level_max: int
+    levels: List[int]
 
 @dataclass
 class Encounter:
