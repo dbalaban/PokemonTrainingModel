@@ -1,6 +1,6 @@
 from data_structures import *
 from PMFs import EV_PMF
-from regimen_sim import RegimenSimulationModel
+from regimen_sim import RegimenSimulator
 import numpy as np
 
 # Regimen table:
@@ -19,7 +19,7 @@ Starly = SpeciesInfo(
     name="Starly",
     base_stats=StatBlock(hp=40, atk=55, def_=30, spa=30, spd=30, spe=60),
     ev_yield=StatBlock(hp=0, atk=0, def_=0, spa=0, spd=0, spe=1),
-    exp_yield_base=49,
+    base_exp_yield=49,
     growth_rate=GrowthRate.MEDIUM_FAST
 )
 
@@ -27,7 +27,7 @@ Shinx = SpeciesInfo(
     name="Shinx",
     base_stats=StatBlock(hp=45, atk=65, def_=34, spa=40, spd=34, spe=45),
     ev_yield=StatBlock(hp=0, atk=1, def_=0, spa=0, spd=0, spe=0),
-    exp_yield_base=53,
+    base_exp_yield=53,
     growth_rate=GrowthRate.MEDIUM_FAST
 )
 
@@ -35,7 +35,7 @@ Zubat = SpeciesInfo(
     name="Zubat",
     base_stats=StatBlock(hp=40, atk=45, def_=35, spa=30, spd=40, spe=55),
     ev_yield=StatBlock(hp=0, atk=0, def_=0, spa=0, spd=0, spe=1),
-    exp_yield_base=49,
+    base_exp_yield=49,
     growth_rate=GrowthRate.MEDIUM_FAST
 )
 
@@ -43,7 +43,7 @@ Machop = SpeciesInfo(
     name="Machop",
     base_stats=StatBlock(hp=70, atk=80, def_=50, spa=35, spd=35, spe=35),
     ev_yield=StatBlock(hp=0, atk=1, def_=0, spa=0, spd=0, spe=0),
-    exp_yield_base=61,
+    base_exp_yield=61,
     growth_rate=GrowthRate.MEDIUM_FAST
 )
 
@@ -51,7 +51,7 @@ Ponyta = SpeciesInfo(
     name="Ponyta",
     base_stats=StatBlock(hp=50, atk=85, def_=55, spa=65, spd=65, spe=90),
     ev_yield=StatBlock(hp=0, atk=0, def_=0, spa=1, spd=0, spe=0),
-    exp_yield_base=82,
+    base_exp_yield=82,
     growth_rate=GrowthRate.MEDIUM_FAST
 )
 
@@ -59,13 +59,15 @@ Riolu = SpeciesInfo(
     name="Riolu",
     base_stats=StatBlock(hp=40, atk=70, def_=40, spa=35, spd=40, spe=60),
     ev_yield=StatBlock(hp=0, atk=1, def_=0, spa=0, spd=0, spe=0),
-    exp_yield_base=70,
-    growth_rate=GrowthRate.MEDIUM_SLOW
+    base_exp_yield=70,
+    growth_rate=GrowthRate.MEDIUM_SLOW,
+    is_trainer_owned=True
 )
 
 regimen = TrainingRegimen(blocks=[
     # Block 1: Level 1-5, Route 201, Starly
     TrainingBlock(
+        location="Route 201",
         start_level=1,
         end_level=5,
         encounters=[
@@ -74,6 +76,7 @@ regimen = TrainingRegimen(blocks=[
     ),
     # Block 2: Level 5-8, Route 202, Shinx
     TrainingBlock(
+        location="Route 202",
         start_level=5,
         end_level=8,
         encounters=[
@@ -82,6 +85,7 @@ regimen = TrainingRegimen(blocks=[
     ),
     # Block 3: Level 8-9, Route 203, Starly
     TrainingBlock(
+        location="Route 203",
         start_level=8,
         end_level=9,
         encounters=[
@@ -91,6 +95,7 @@ regimen = TrainingRegimen(blocks=[
     ),
     # Block 4: Level 9-10, Route 203, Shinx
     TrainingBlock(
+        location="Route 203",
         start_level=9,
         end_level=10,
         encounters=[
@@ -99,6 +104,7 @@ regimen = TrainingRegimen(blocks=[
     ),
     # Block 5: Level 10-12, Oreburgh Gate / Ravaged Path, Zubat
     TrainingBlock(
+        location="Oreburgh Gate",
         start_level=10,
         end_level=12,
         encounters=[
@@ -107,6 +113,7 @@ regimen = TrainingRegimen(blocks=[
     ),
     # Block 6: Level 12-13, Route 207, Machop
     TrainingBlock(
+        location="Route 207",
         start_level=12,
         end_level=13,
         encounters=[
@@ -115,6 +122,7 @@ regimen = TrainingRegimen(blocks=[
     ),
     # Block 7: Level 13-18, Route 207, Ponyta
     TrainingBlock(
+        location="Route 207",
         start_level=13,
         end_level=18,
         encounters=[
@@ -123,6 +131,7 @@ regimen = TrainingRegimen(blocks=[
     ),
     # Block 8: Level 18-20, Route 207, Machop
     TrainingBlock(
+        location="Route 207",
         start_level=18,
         end_level=20,
         encounters=[
@@ -132,7 +141,7 @@ regimen = TrainingRegimen(blocks=[
 ])
 
 def main():
-    model = RegimenSimulationModel(
+    model = RegimenSimulator(
         regimen=regimen,
         species=Riolu,
         gen=4

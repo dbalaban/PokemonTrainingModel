@@ -25,11 +25,11 @@ class StatBlock:
     Used for base stats, IV guesses, EV guesses, etc.
     """
     hp: int = 0
-    attack: int = 0
-    defense: int = 0
-    special_attack: int = 0
-    special_defense: int = 0
-    speed: int = 0
+    atk: int = 0
+    def_: int = 0
+    spa: int = 0
+    spd: int = 0
+    spe: int = 0
 
     def __getitem__(self, key: StatType) -> int:
         if not isinstance(key, StatType):
@@ -46,11 +46,11 @@ class StatBlock:
     def __add__(self, other: "StatBlock") -> "StatBlock":
         return StatBlock(
             hp=self.hp + other.hp,
-            attack=self.attack + other.attack,
-            defense=self.defense + other.defense,
-            special_attack=self.special_attack + other.special_attack,
-            special_defense=self.special_defense + other.special_defense,
-            speed=self.speed + other.speed,
+            atk=self.atk + other.atk,
+            def_=self.def_ + other.def_,
+            spa=self.spa + other.spa,
+            spd=self.spd + other.spd,
+            spe=self.spe + other.spe,
         )
 
     def __sub__(self, other: "StatBlock") -> "StatBlock":
@@ -61,29 +61,29 @@ class StatBlock:
         return StatBlock(
             hp=self.hp - other.hp,
             attack=self.attack - other.attack,
-            defense=self.defense - other.defense,
-            special_attack=self.special_attack - other.special_attack,
-            special_defense=self.special_defense - other.special_defense,
-            speed=self.speed - other.speed,
+            def_=self.def_ - other.def_,
+            spa=self.spa - other.spa,
+            spd=self.spd - other.spd,
+            spe=self.spe - other.spe,
         )
 
     def clamp_nonnegative(self) -> "StatBlock":
         return StatBlock(
             hp=max(0, self.hp),
-            attack=max(0, self.attack),
-            defense=max(0, self.defense),
-            special_attack=max(0, self.special_attack),
-            special_defense=max(0, self.special_defense),
-            speed=max(0, self.speed),
+            atk=max(0, self.atk),
+            def_=max(0, self.def_),
+            spa=max(0, self.spa),
+            spd=max(0, self.spd),
+            spe=max(0, self.spe),
         )
 
     def to_dict(self) -> dict:
         return {
             "hp": self.hp,
-            "attack": self.attack,
-            "defense": self.defense,
-            "special_attack": self.special_attack,
-            "special_defense": self.special_defense,
+            "attack": self.atk,
+            "defense": self.def_,
+            "special_attack": self.spa,
+            "special_defense": self.spd,
             "speed": self.speed,
         }
 
@@ -145,6 +145,7 @@ class SpeciesInfo:
     growth_rate: GrowthRate
     base_exp_yield: int
     ev_yield: StatBlock
+    is_trainer_owned: bool = False
 
     def exp_to_level(self, level: int) -> int:
         """
@@ -209,24 +210,6 @@ class SpeciesInfo:
         """
         return self.exp_bin_search(exp)
 
-# =====================
-# EXP yield for KOs
-# =====================
-
-@dataclass(frozen=True)
-class TargetPokemonSpecies:
-    """
-    A KO-able species for encounter tables.
-    This is essentially a view of SpeciesInfo for "things we defeat":
-      - species_name
-      - base_exp_yield
-      - ev_yield (granted on KO)
-    """
-    species_name: str
-    base_exp_yield: int
-    ev_yield: StatBlock
-    is_trainer_owned: bool
-
     def get_exp_yield_flat(
         self,
         fainted_level: int,
@@ -289,7 +272,6 @@ class TargetPokemonSpecies:
         fainted_level: int,
         winner_level: int,
         gen: int,
-        is_trainer_owned: bool,
     ) -> int:
         """
         Unified EXP entry point for this simplified model.
@@ -301,14 +283,12 @@ class TargetPokemonSpecies:
             return self.get_exp_yield_scaled(
                 fainted_level=fainted_level,
                 winner_level=winner_level,
-                gen=gen,
-                is_trainer_owned=is_trainer_owned,
+                gen=gen
             )
         else:
             return self.get_exp_yield_flat(
                 fainted_level=fainted_level,
-                gen=gen,
-                is_trainer_owned=is_trainer_owned,
+                gen=gen
             )
 
 # =====================
@@ -321,7 +301,7 @@ class EncounterOption:
     One possible encounter within a TrainingBlock.
     `weight` is its relative encounter chance (doesn't need to be normalized).
     """
-    target: TargetPokemonSpecies
+    target: SpeciesInfo
     weight: float
     levels: List[int]
 
@@ -330,7 +310,7 @@ class Encounter:
     """
     An actual encounter instance, with chosen level.
     """
-    target: TargetPokemonSpecies
+    target: SpeciesInfo
     level: int
 
 @dataclass

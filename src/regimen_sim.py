@@ -11,10 +11,10 @@ class RegimenSimulator:
         self.regimen = regimen
         self.species = species
         self.gen = gen
-        self.samples = List[StatBlock]()
+        self.samples: List[StatBlock] = []
 
     def randomEncounter(self, encounters: List[EncounterOption]) -> Encounter:
-        rates = np.array([enc.rate for enc in encounters])
+        rates = np.array([enc.weight for enc in encounters])
         rates = rates / rates.sum()
         opetion_choice = np.random.choice(len(encounters), p=rates)
 
