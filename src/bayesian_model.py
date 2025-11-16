@@ -1,7 +1,7 @@
 # bayesian_model.py
 
 from data_structures import *
-from PMFs import EV_PMF
+from PMFs import EV_PMF, IV_PMF, barycentric_simplex
 import numpy as np
 import math
 from typing import Tuple
@@ -151,6 +151,47 @@ def _predict_stats_batch(EV: np.ndarray, IV: np.ndarray,
         out[s] = np.floor(core * nm[s]).astype(int)
     return out
 
+
+def _round_allocations_to_total(ev_alloc: np.ndarray, desired_total: int, max_ev: int) -> np.ndarray:
+    """
+    Given a float allocation vector `ev_alloc` (length 6) whose exact sum equals
+    `desired_total` up to floating error, produce an integer vector in [0,max_ev]
+    whose sum equals `desired_total` by floor+largest-remainder rounding while
+    respecting per-stat bounds.
+    """
+    # floor and remainders
+    ev_floor = np.floor(ev_alloc).astype(int)
+    ev_floor = np.clip(ev_floor, 0, max_ev)
+    rem = int(desired_total - ev_floor.sum())
+    if rem == 0:
+        return ev_floor
+
+    remainders = ev_alloc - np.floor(ev_alloc)
+    # sort indices by descending fractional part
+    idx_order = np.argsort(-remainders)
+    out = ev_floor.copy()
+    # try to add 1 to highest remainders while respecting max_ev
+    for i in idx_order:
+        if rem <= 0:
+            break
+        if out[i] < max_ev:
+            out[i] += 1
+            rem -= 1
+
+    # if still remaining (rare, e.g., all at max_ev), distribute to any indices (wrap)
+    if rem > 0:
+        for i in range(6):
+            if rem <= 0:
+                break
+            if out[i] < max_ev:
+                add = min(max_ev - out[i], rem)
+                out[i] += add
+                rem -= add
+
+    # if rem still > 0, we couldn't satisfy desired_total due to bounds; as a last
+    # resort, adjust by clipping and leave sum as close as possible
+    return out
+
 def hybrid_ev_iv_update(
     prior_ev: EV_PMF,
     prior_iv: IV_PMF,          # shape (6, 32) rows sum to 1
@@ -231,8 +272,19 @@ def hybrid_ev_iv_update(
         EV_mat = np.empty((6, M), dtype=float)
         for k, t in enumerate(uniqT):
             sel = (inv == k)
-            EV_mat[:, sel] = C_cache[int(t)] @ W6[:, sel]
-        EV_mat = np.rint(EV_mat).clip(0, ev_post.max_ev).astype(int)
+            # _get_corners returns rows = vertices; use transpose so columns are
+            # vertices when multiplying by weight vectors from W6. The float
+            # allocations are stored in EV_mat and will be rounded per-sample
+            # to enforce exact totals.
+            EV_mat[:, sel] = C_cache[int(t)].T @ W6[:, sel]
+
+        # Round per-sample allocations to integer EVs while enforcing per-sample
+        # totals equal to the sampled T_idx values (and per-stat bounds).
+        EV_int = np.empty((6, M), dtype=int)
+        for j in range(M):
+            desired_t = int(T_idx[j])
+            EV_int[:, j] = _round_allocations_to_total(EV_mat[:, j], desired_t, ev_post.max_ev)
+        EV_mat = EV_int
 
         IV_mat = iv_post.sample(M)  # sample from current IV posterior
 
@@ -256,17 +308,20 @@ def hybrid_ev_iv_update(
 
         # Rebuild EV posterior (T and W)
         totals = EV_mat.sum(axis=0)
+        # rounding of allocations can sometimes produce a total of max_total_ev+1
+        # (e.g., 510 -> 511) due to per-stat rounding; clip to valid index range
+        totals_clipped = np.clip(totals, 0, ev_post.max_total_ev).astype(int)
         new_T = np.zeros_like(ev_post.T, dtype=float)
-        np.add.at(new_T, totals, w)
+        np.add.at(new_T, totals_clipped, w)
         new_T = new_T / new_T.sum() if new_T.sum() > 0 else ev_post.T.copy()
 
         new_W = np.zeros_like(ev_post.W, dtype=float)
         BINS = ev_post.w_bins
-        Ccols_cache = {t: C_cache[t].T for t in C_cache}
+        # Precompute the corners columns used for each sample (based on sampled T)
+        Ccols_per_sample = [C_cache[int(uniqT[inv[j]])].T for j in range(M)]
 
         for j in range(M):
-            Tj = int(totals[j])
-            C_cols = Ccols_cache[Tj]
+            C_cols = Ccols_per_sample[j]
             w6 = barycentric_simplex(C_cols, EV_mat[:, j].astype(float))
             s5 = EV_PMF._invert_stick_breaking(w6)
             idx = np.rint(s5 * (BINS - 1)).astype(int).clip(0, BINS - 1)
@@ -317,8 +372,14 @@ def update_with_observation(
     EV_mat = np.empty((6, M), dtype=float)
     for k, t in enumerate(uniq_T):
         sel = (inv == k)
-        EV_mat[:, sel] = C_cache[int(t)] @ W6[:, sel]
-    EV_mat = np.rint(EV_mat).clip(0, prior_ev.max_ev).astype(int)
+        # use transpose of corners so columns correspond to vertex allocations
+        EV_mat[:, sel] = C_cache[int(t)].T @ W6[:, sel]
+
+    EV_int = np.empty((6, M), dtype=int)
+    for j in range(M):
+        desired_t = int(t_idx[j])
+        EV_int[:, j] = _round_allocations_to_total(EV_mat[:, j], desired_t, prior_ev.max_ev)
+    EV_mat = EV_int
 
     IV_mat = prior_iv.sample(M)                       # (6, M)
     pred = _predict_stats_batch(EV_mat, IV_mat, base_stats, level, nature)
@@ -346,17 +407,19 @@ def update_with_observation(
 
     # ----- EV posterior as EV_PMF (T and W rows) -----
     totals = EV_mat.sum(axis=0)
+    # clip totals to valid index range (rounding can push some totals to max+1)
+    totals_clipped = np.clip(totals, 0, prior_ev.max_total_ev).astype(int)
     new_T = np.zeros_like(prior_ev.T, dtype=float)
-    np.add.at(new_T, totals, w)
+    np.add.at(new_T, totals_clipped, w)
     new_T = new_T / new_T.sum() if new_T.sum() > 0 else prior_ev.T.copy()
 
     new_W = np.zeros_like(prior_ev.W, dtype=float)
     B = prior_ev.w_bins
-    Ccols_cache = {t: C_cache[t].T.astype(float) for t in C_cache}
+    # Precompute corner-columns per sample (based on sampled totals uniq_T/inv)
+    Ccols_per_sample = [C_cache[int(uniq_T[inv[j]])].T.astype(float) for j in range(M)]
 
     for j in range(M):
-        Tj = int(totals[j])
-        C_cols = Ccols_cache[Tj]
+        C_cols = Ccols_per_sample[j]
         w6 = barycentric_simplex(C_cols, EV_mat[:, j].astype(float))
         s5 = EV_PMF._invert_stick_breaking(w6)
         idx = np.rint(s5 * (B - 1)).astype(int).clip(0, B - 1)

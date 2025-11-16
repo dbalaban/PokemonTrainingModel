@@ -65,10 +65,15 @@ class IV_PMF:
         np.divide(self.prior, rs, out=self.prior, where=(rs > 0))
 
     def sample(self, M: int) -> np.ndarray:
-        # returns shape (6, M) IVs in 0..31
-        cdf = np.cumsum(self.prior, axis=1); cdf[:, -1] = 1.0
+        # returns (6, M) ints in 0..31
+        cdf = np.cumsum(self.prior, axis=1)
+        cdf[:, -1] = 1.0  # guard against tiny float drift
+
         u = self.rng.random((6, M))
-        idx = np.searchsorted(cdf, u, side="right")
+        idx = np.empty((6, M), dtype=int)
+        for s in range(6):
+            idx[s] = np.searchsorted(cdf[s], u[s], side="right")
+
         return np.clip(idx, 0, 31)
 
     def weighted_add_(self, iv_mat: np.ndarray, w: np.ndarray) -> None:
