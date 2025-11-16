@@ -2,34 +2,46 @@ from data_structures import *
 from PMFs import EV_PMF
 import numpy as np
 
-def update_ev_pmf(prior_pmf: EV_PMF, update: EV_PMF) -> EV_PMF:
+def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
     """
-    prior_pmf: EV_PMF representing the prior distribution.
-    update: EV_PMF representing the EV gain likelihood between intervals.
-
-    Returns the updated EV_PMF.
+    Update EV PMF:
+      - T: discrete convolution (totals add)
+      - W: barycenter of the five independent stick-breaking row pmfs,
+           weighted solely by E[T] from prior and update.
+    mode: "linear" or "geometric"
     """
-    # Pi+1(x) = Pi(x-u)*P(u) summed over u
-    new_T = np.zeros_like(prior_pmf.T)
-    for u in range(update.max_total_ev + 1):
-        shifted_T = np.roll(prior_pmf.T, u)
-        shifted_T[:u] = 0  # zero out invalid wrap-around
-        new_T += shifted_T * update.T[u]
-    new_T /= new_T.sum()  # normalize
+    # ---- 1) Update T via convolution ----
+    # both vectors length = max_total_ev+1
+    new_T = np.convolve(prior.T, upd.T)[:prior.max_total_ev + 1]
+    s = new_T.sum()
+    new_T = new_T / s if s > 0 else prior.T.copy()
 
-    # as W is conditionally independent of T, 
-    # take the weighted sum over all T values
-    prior_w = np.zeros_like(prior_pmf.W)
-    for t_old in range(prior_pmf.max_total_ev + 1):
-        prior_w += t_old*prior_pmf.T[t_old]
+    # ---- 2) Update W using only expected totals as masses ----
+    tvals_prior = np.arange(prior.max_total_ev + 1, dtype=float)
+    tvals_upd   = np.arange(upd.max_total_ev   + 1, dtype=float)
+    m_prior = float((tvals_prior * prior.T).sum())
+    m_upd   = float((tvals_upd   * upd.T  ).sum())
+    denom = m_prior + m_upd
 
-    update_w = np.zeros_like(update.W)
-    for t_new in range(update.max_total_ev + 1):
-        update_w += t_new*update.T[t_new]
+    if denom <= 0:
+        new_W = prior.W.copy()
+    else:
+        if mode == "linear":
+            # Dirichlet-mean / convex barycenter per row
+            new_W = (m_prior * prior.W + m_upd * upd.W) / denom
+            row_sums = new_W.sum(axis=1, keepdims=True)
+            new_W = np.divide(new_W, row_sums, out=new_W, where=(row_sums > 0))
+        elif mode == "geometric":
+            # Product-of-experts barycenter per row (sharper)
+            eps = 1e-12
+            logW = m_prior * np.log(prior.W + eps) + m_upd * np.log(upd.W + eps)
+            new_W = np.exp(logW)
+            row_sums = new_W.sum(axis=1, keepdims=True)
+            new_W = np.divide(new_W, row_sums, out=new_W, where=(row_sums > 0))
+        else:
+            raise ValueError("mode must be 'linear' or 'geometric'")
 
-    new_W = (prior_w*prior_pmf.W + update_w*update.W) / (prior_w + update_w)
-
-    return EV_PMF(priorT=new_T, priorW=new_W)
+    return EV_PMF(priorT=new_T, priorW=new_W, w_bins=prior.w_bins)
 
 class BayesianModel:
     def __init__(self):
