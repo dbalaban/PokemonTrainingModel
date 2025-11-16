@@ -147,8 +147,7 @@ def main():
         gen=4
     )
 
-    num_trials = 10000
-    model.run_simulation(num_trials=num_trials, exp_start=0)
+    model.run_simulation(num_trials=10000, exp_start=0)
 
     # show histogram of EV distributions
     model.plot_ev_distributions()

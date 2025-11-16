@@ -5,38 +5,14 @@ from data_structures import *
 from scipy.optimize import minimize
 from typing import Optional
 
-def barycentric_simplex(C, y):
-    """
-    C: (d,k) matrix whose columns are the 'corners' in R^d
-    y: (d,) target vector
-    returns w in the probability simplex: sum w = 1, w >= 0
-    """
-    k = C.shape[1]
-    # objective
-    def obj(w):
-        r = C @ w - y
-        return 0.5 * r.dot(r)
 
-    # constraints: sum w = 1, and w >= 0 componentwise
-    cons = [
-        {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},
-        {'type': 'ineq', 'fun': lambda w: w}  # each w_i >= 0
-    ]
-    # warm start: least squares projected onto simplex
-    w0_ls, *_ = np.linalg.lstsq(C, y, rcond=None)
-    w0 = project_to_simplex(w0_ls)
-
-    res = minimize(obj, w0, method='SLSQP',
-                   bounds=[(0.0, None)] * k,
-                   constraints=cons)
-    if not res.success:
-        # Fallback: just return the simplex projection of ls
-        return project_to_simplex(w0_ls)
-    return res.x
+# ----------------------
+# Utilities
+# ----------------------
 
 def project_to_simplex(v):
     """Euclidean projection onto {w: w>=0, sum w=1} (Duchi et al., 2008)."""
-    v = np.asarray(v)
+    v = np.asarray(v, dtype=float)
     n = v.size
     u = np.sort(v)[::-1]
     cssv = np.cumsum(u)
@@ -44,6 +20,70 @@ def project_to_simplex(v):
     theta = (cssv[rho] - 1) / (rho + 1.0)
     w = np.maximum(v - theta, 0.0)
     return w
+
+
+# ----------------------
+# Capped-simplex projection (sum=T, 0<=x<=U)
+# ----------------------
+
+def project_capped_simplex(y: np.ndarray, T: int, U: int = 252, tol: float = 1e-9) -> np.ndarray:
+    """
+    Project y in R^6 onto { x: sum x = T, 0 <= x_i <= U } in L2.
+    Returns float vector x (not rounded to ints).
+    """
+    y = np.asarray(y, dtype=float)
+    Uvec = np.full_like(y, float(U))
+    # Clamp T to a valid range (defensive)
+    T = float(np.clip(T, 0.0, Uvec.sum()))
+
+    # Bisection for tau such that sum clip(y - tau, 0, U) = T
+    lo = (y - Uvec).min() - 1.0
+    hi = y.max() + 1.0
+    x = None
+    for _ in range(60):  # enough for double precision
+        tau = 0.5 * (lo + hi)
+        x = np.clip(y - tau, 0.0, U)
+        s = x.sum()
+        if abs(s - T) <= tol:
+            break
+        if s > T:
+            lo = tau
+        else:
+            hi = tau
+    return x if x is not None else np.clip(y, 0.0, U)
+
+
+def integerize_with_waterfill(x: np.ndarray, T: int, U: int = 252) -> np.ndarray:
+    """
+    Turn a real feasible x (sum close to T, 0<=x<=U) into an integer EV vector:
+    - round to nearest
+    - adjust +/-1 guided by fractional parts while respecting caps
+    """
+    x = np.asarray(x, dtype=float)
+    E = np.rint(x).astype(int)
+    E = np.clip(E, 0, U)
+    diff = int(T) - int(E.sum())
+    if diff == 0:
+        return E
+
+    frac = x - np.floor(x)
+    order = np.argsort(frac)[::-1] if diff > 0 else np.argsort(frac)
+    step = 1 if diff > 0 else -1
+    k = 0
+    n = E.size
+    while diff != 0 and k < n:
+        i = order[k]
+        cand = E[i] + step
+        if 0 <= cand <= U:
+            E[i] = cand
+            diff -= step
+        k += 1
+    return E
+
+
+# ----------------------
+# IV PMF
+# ----------------------
 
 class IV_PMF:
     def __init__(self, prior: np.ndarray | None = None, rng: np.random.Generator | None = None):
@@ -65,19 +105,22 @@ class IV_PMF:
         np.divide(self.prior, rs, out=self.prior, where=(rs > 0))
 
     def sample(self, M: int) -> np.ndarray:
-        # returns (6, M) ints in 0..31
+        """
+        Returns (6, M) ints in 0..31 sampled row-wise from the PMFs.
+        """
         cdf = np.cumsum(self.prior, axis=1)
-        cdf[:, -1] = 1.0  # guard against tiny float drift
-
+        cdf[:, -1] = 1.0
         u = self.rng.random((6, M))
         idx = np.empty((6, M), dtype=int)
         for s in range(6):
             idx[s] = np.searchsorted(cdf[s], u[s], side="right")
-
         return np.clip(idx, 0, 31)
 
     def weighted_add_(self, iv_mat: np.ndarray, w: np.ndarray) -> None:
-        # iv_mat: (6, M), w: (M,)
+        """
+        iv_mat: (6, M), values in 0..31
+        w:      (M,) nonnegative weights summing to 1 (not strictly required; we normalize)
+        """
         out = np.zeros_like(self.prior)
         for s in range(6):
             np.add.at(out[s], iv_mat[s], w)
@@ -95,6 +138,11 @@ class IV_PMF:
         out = IV_PMF(P, rng=self.rng)
         out.normalize_()
         return out
+
+
+# ----------------------
+# EV PMF using 5-parameter stick-breaking + capped-simplex projection
+# ----------------------
 
 class EV_PMF:
     def __init__(self, priorT: np.ndarray | None = None, priorW: np.ndarray | None = None,
@@ -127,15 +175,16 @@ class EV_PMF:
         # fixed bin centers in [0,1]
         self.s_grid = np.linspace(0.0, 1.0, self.w_bins)
 
-    # ---------- stick-breaking (no sigmoid; inputs already in [0,1]) ----------
+    # ---------- stick-breaking ----------
+
     @staticmethod
     def _stick_breaking_from_unit(S5: np.ndarray, eps: float = 1e-12) -> np.ndarray:
         """
         S5: (5, M) with entries in [0,1]; returns W6: (6, M) on the simplex.
         """
-        S = np.clip(S5, eps, 1.0 - eps)             # strict interior if desired
-        one_minus = 1.0 - S                         # (5, M)
-        cumprod = np.cumprod(one_minus, axis=0)     # (5, M)
+        S = np.clip(S5, eps, 1.0 - eps)
+        one_minus = 1.0 - S
+        cumprod = np.cumprod(one_minus, axis=0)
 
         W6 = np.empty((6, S.shape[1]), dtype=S.dtype)
         W6[0] = S[0]
@@ -160,89 +209,73 @@ class EV_PMF:
                 s_k = w[k] / rem
             S[k] = np.clip(s_k, 0.0, 1.0)
             rem *= (1.0 - S[k])
-        # Optionally: assert np.allclose(w[5], rem, atol=1e-8)
         return S
 
-    @staticmethod
-    def _get_corners(T: int) -> np.ndarray:
-        max_ev = 252
-        n_stats = 6
-        max_total_ev = 2 * max_ev + n_stats
-        assert 0 <= T <= max_total_ev
-
-        if T == 0:
-            return np.zeros((n_stats, n_stats), dtype=int)
-
-        if T <= max_ev:
-            V = np.zeros((n_stats, n_stats), dtype=int)
-            idx = np.arange(n_stats)
-            V[idx, idx] = T
-            return V
-
-        if T <= 2 * max_ev:
-            rest = T - max_ev
-            base = np.zeros(n_stats, dtype=int)
-            base[0] = max_ev
-            base[1] = rest
-            return np.vstack([np.roll(base, i) for i in range(n_stats)])
-
-        leftover = T - 2 * max_ev  # in [1, 6]
-        base = np.zeros(n_stats, dtype=int)
-        base[0] = max_ev
-        base[1] = max_ev
-        base[2] = leftover
-        return np.vstack([np.roll(base, i) for i in range(n_stats)])
-
     # ---------- sample S ~ independent row PMFs over s_grid ----------
+
     def _sample_S5(self, M: int) -> np.ndarray:
         """
         Draw M i.i.d. samples of S = (s1..s5) from independent discrete pmfs in self.W.
         Returns S5 of shape (5, M) with values in [0,1] from self.s_grid.
         """
         B = self.w_bins
-        # ensure each row is a valid CDF ending at 1
         row_sums = self.W.sum(axis=1, keepdims=True)
         W_row = np.divide(self.W, row_sums, out=np.zeros_like(self.W), where=(row_sums > 0))
         cdfs = np.cumsum(W_row, axis=1)
-        cdfs[:, -1] = 1.0  # guard against tiny float drift
+        cdfs[:, -1] = 1.0
 
         u = self.rng.random((5, M))
         idx = np.empty((5, M), dtype=int)
         for r in range(5):
             idx[r] = np.searchsorted(cdfs[r], u[r], side='right')
         idx = np.minimum(idx, B - 1)
-
         return self.s_grid[idx]
 
-    # ---------- marginals via Monte Carlo over S (fast & vectorized) ----------
+    # ---------- NEW: allocation from (T, W6 column) via capped-simplex ----------
+
+    @staticmethod
+    def _ev_from_W6_and_T(W6_col: np.ndarray, T: int, U: int = 252) -> np.ndarray:
+        """
+        Given a 6-way proportion W6_col (sum to 1) and a total T,
+        project y = T * W6_col onto the capped simplex (sum=T, 0<=x<=U), then integerize.
+        Returns int vector of length 6, sum=T, each in [0,U].
+        """
+        y = T * np.asarray(W6_col, dtype=float)
+        x = project_capped_simplex(y, T=T, U=U)
+        return integerize_with_waterfill(x, T=T, U=U)
+
+    # ---------- marginals via Monte Carlo over S with capped-simplex projection ----------
+
     def getMarginals(self, mc_samples: int = 5000) -> np.ndarray:
         """
         Returns marginals[stat, ev] = P(stat has EV=ev). Shape: (6, max_ev+1).
-        Approximates the integral over S1..S5 using Monte Carlo samples drawn from
-        the independent pmfs in self.W. Larger mc_samples => better accuracy.
+
+        This version draws S~W (stick-breaking), forms 6-way proportions W6,
+        then for each total T, produces EV allocations by projecting T*W6
+        onto the capped simplex (sum=T, 0<=E<=U) and rounding with a
+        small water-fill. This covers the full feasible region (no corner
+        matrix needed).
         """
         nS, maxEV, maxT = self.n_stats, self.max_ev, self.max_total_ev
 
         # Draw S samples once, build W6 via stick-breaking
-        S5 = self._sample_S5(mc_samples)                         # (5, M)
-        W6 = self._stick_breaking_from_unit(S5)                  # (6, M)
+        S5 = self._sample_S5(mc_samples)                   # (5, M)
+        W6 = self._stick_breaking_from_unit(S5)            # (6, M)
 
         marginals = np.zeros((nS, maxEV + 1), dtype=float)
 
-        # Loop only over totals; vectorize over M samples
-        for t in range(maxT + 1):
-            C = self._get_corners(t).astype(float)                # (6, 6)
-            ev_alloc = C @ W6                                    # (6, M)
-            ev_idx = np.rint(ev_alloc).astype(int)
-            np.clip(ev_idx, 0, maxEV, out=ev_idx)
-
-            # Each sample has weight T[t] / M (since samples ~ P(S))
-            w = self.T[t] / mc_samples
-
-            rows = np.repeat(np.arange(nS), mc_samples)          # (6*M,)
-            cols = ev_idx.reshape(-1)                            # (6*M,)
-            vals = np.full(6 * mc_samples, w, dtype=float)
-            np.add.at(marginals, (rows, cols), vals)
+        # Loop over totals; for each T accumulate contributions from all samples
+        for T in range(maxT + 1):
+            if self.T[T] == 0.0:
+                continue
+            w_T = self.T[T] / mc_samples  # weight per sample for this T
+            # Produce EV for each column j
+            for j in range(mc_samples):
+                EV = self._ev_from_W6_and_T(W6[:, j], T, U=maxEV)
+                # scatter-add
+                for s in range(nS):
+                    ev_val = EV[s]
+                    marginals[s, ev_val] += w_T
 
         # Normalize per-stat for numerical safety
         s = marginals.sum(axis=1, keepdims=True)

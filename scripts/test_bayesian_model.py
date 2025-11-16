@@ -94,7 +94,7 @@ def main():
         level=level,
         base_stats=base_stats,
         nature=nature,
-        M=30000,          # more particles -> tighter posterior
+        M=300000,          # more particles -> tighter posterior
         tol=1,            # exact match; consider tol=1 for robustness
     )
     iv_post_1 = post_iv_1.P  # (6, 32)

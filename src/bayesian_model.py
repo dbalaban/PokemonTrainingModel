@@ -1,10 +1,12 @@
 # bayesian_model.py
 
 from data_structures import *
-from PMFs import EV_PMF, IV_PMF, barycentric_simplex
+from PMFs import EV_PMF, IV_PMF
 import numpy as np
 import math
 from typing import Tuple
+
+from tqdm import tqdm
 
 def nature_to_multipliers(nature: Nature) -> np.ndarray:
     return np.array([
@@ -25,7 +27,6 @@ def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
     mode: "linear" or "geometric"
     """
     # ---- 1) Update T via convolution ----
-    # both vectors length = max_total_ev+1
     new_T = np.convolve(prior.T, upd.T)[:prior.max_total_ev + 1]
     s = new_T.sum()
     new_T = new_T / s if s > 0 else prior.T.copy()
@@ -41,12 +42,10 @@ def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
         new_W = prior.W.copy()
     else:
         if mode == "linear":
-            # Dirichlet-mean / convex barycenter per row
             new_W = (m_prior * prior.W + m_upd * upd.W) / denom
             row_sums = new_W.sum(axis=1, keepdims=True)
             new_W = np.divide(new_W, row_sums, out=new_W, where=(row_sums > 0))
         elif mode == "geometric":
-            # Product-of-experts barycenter per row (sharper)
             eps = 1e-12
             logW = m_prior * np.log(prior.W + eps) + m_upd * np.log(upd.W + eps)
             new_W = np.exp(logW)
@@ -65,7 +64,6 @@ def _t_candidates(y: int, n: float) -> range:
     Integers t such that floor(t * n) == y (non-HP stats).
     """
     lo = math.ceil(y / n)
-    # subtract a tiny epsilon at the top to avoid including the next integer
     hi = math.floor((y + 1 - 1e-9) / n)
     if hi < lo:
         return range(0, 0)
@@ -99,7 +97,6 @@ def feasible_ev_mask_for_stat(
     Return a boolean mask over EV in [0..252] feasible for a given IV, observed y,
     base B, level L, and nature multiplier n (1.0 for HP).
     """
-    # Gather feasible s values (for non-HP via t-candidates; for HP directly)
     s_vals = set()
 
     if is_hp:
@@ -117,7 +114,6 @@ def feasible_ev_mask_for_stat(
     if not s_vals:
         return np.zeros(253, dtype=bool)
 
-    # For each s, k = s - (2B + IV), must be in [0..63]
     k_list = []
     base_term = 2 * B + iv
     for s in s_vals:
@@ -130,8 +126,10 @@ def feasible_ev_mask_for_stat(
 
     return _ev_mask_from_k_set(np.asarray(k_list, dtype=int))
 
-def _predict_stats_batch(EV: np.ndarray, IV: np.ndarray,
-                         base: StatBlock, level: int, nature: Nature) -> np.ndarray:
+
+def _predict_stats_batch(
+    EV: np.ndarray, IV: np.ndarray, base: StatBlock, level: int, nature: Nature
+) -> np.ndarray:
     B = np.array([base.hp, base.atk, base.def_, base.spa, base.spd, base.spe], dtype=int)
     nm = np.array([
         1.0,
@@ -159,7 +157,7 @@ def _round_allocations_to_total(ev_alloc: np.ndarray, desired_total: int, max_ev
     whose sum equals `desired_total` by floor+largest-remainder rounding while
     respecting per-stat bounds.
     """
-    # floor and remainders
+    ev_alloc = np.maximum(ev_alloc, 0.0)
     ev_floor = np.floor(ev_alloc).astype(int)
     ev_floor = np.clip(ev_floor, 0, max_ev)
     rem = int(desired_total - ev_floor.sum())
@@ -167,10 +165,8 @@ def _round_allocations_to_total(ev_alloc: np.ndarray, desired_total: int, max_ev
         return ev_floor
 
     remainders = ev_alloc - np.floor(ev_alloc)
-    # sort indices by descending fractional part
     idx_order = np.argsort(-remainders)
     out = ev_floor.copy()
-    # try to add 1 to highest remainders while respecting max_ev
     for i in idx_order:
         if rem <= 0:
             break
@@ -178,7 +174,6 @@ def _round_allocations_to_total(ev_alloc: np.ndarray, desired_total: int, max_ev
             out[i] += 1
             rem -= 1
 
-    # if still remaining (rare, e.g., all at max_ev), distribute to any indices (wrap)
     if rem > 0:
         for i in range(6):
             if rem <= 0:
@@ -188,32 +183,28 @@ def _round_allocations_to_total(ev_alloc: np.ndarray, desired_total: int, max_ev
                 out[i] += add
                 rem -= add
 
-    # if rem still > 0, we couldn't satisfy desired_total due to bounds; as a last
-    # resort, adjust by clipping and leave sum as close as possible
     return out
+
+# --------------------------- Alternating hybrid update ---------------------------
 
 def hybrid_ev_iv_update(
     prior_ev: EV_PMF,
-    prior_iv: IV_PMF,          # shape (6, 32) rows sum to 1
+    prior_iv: IV_PMF,
     obs_stats: StatBlock,
     level: int,
     base_stats: StatBlock,
     nature: Nature,
     *,
-    mc_particles: int = 20000,     # IS particles for EV correction step
-    tol: int = 0,                  # per-stat tolerance in likelihood (0 exact, 1 for ±1)
+    mc_particles: int = 20000,
+    tol: int = 0,
     max_iters: int = 5,
-    iv_tv_tol: float = 1e-4,       # stop if IV TV distance per row is small
+    iv_tv_tol: float = 1e-4,
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
-    Hybrid alternating update:
+    Hybrid alternating update (no corners):
       1) IV update by exact inversion + weighting with current EV marginals.
       2) EV update by importance sampling constrained by current IV posterior.
-    Repeats until IV posterior stabilizes or max_iters is reached.
-
-    Returns: (posterior_EV_PMF, posterior_IV_6x32)
     """
-    # Initialize
     ev_post = prior_ev
     iv_post = IV_PMF(prior=prior_iv.P, rng=prior_ev.rng)
 
@@ -228,9 +219,9 @@ def hybrid_ev_iv_update(
         nature.modifier(StatType.SPEED),
     ], dtype=float)
 
-    for it in range(max_iters):
+    for _ in tqdm(range(max_iters), desc="Hybrid EV/IV update"):
         # ----- (1) IV update via exact inversion + EV marginals -----
-        ev_marg = ev_post.getMarginals(mc_samples=10000)  # (6,253)
+        ev_marg = ev_post.getMarginals(mc_samples=10000)  # (6, 253)
         old_P = iv_post.P.copy()
         new_iv = np.zeros_like(old_P)
 
@@ -245,49 +236,37 @@ def hybrid_ev_iv_update(
                 new_iv[s, iv_val] = old_P[s, iv_val] * mass
 
             row_sum = new_iv[s].sum()
-            if row_sum > 0:
-                new_iv[s] /= row_sum
-            else:
-                new_iv[s] = old_P[s]
+            new_iv[s] = (new_iv[s] / row_sum) if row_sum > 0 else old_P[s]
 
-        # convergence check on IV (TV distance)
         tv = 0.5 * np.abs(new_iv - old_P).sum(axis=1)
-        iv_post.prior = new_iv          # or iv_post.P = new_iv
+        iv_post.prior = new_iv
         iv_post.normalize_()
         if np.all(tv < iv_tv_tol):
             break
 
-        # ----- (2) EV update via importance sampling -----
+        # ----- (2) EV update via importance sampling (stick-breaking only) -----
         M = mc_particles
 
-        S5 = ev_post._sample_S5(M)
-        W6 = EV_PMF._stick_breaking_from_unit(S5)
+        # Sample S5 and W6 from current EV posterior
+        S5 = ev_post._sample_S5(M)                         # (5, M)
+        W6 = EV_PMF._stick_breaking_from_unit(S5)          # (6, M)
+
+        # Sample totals T
         t_cdf = np.cumsum(ev_post.T)
         uT = ev_post.rng.random(M)
         T_idx = np.searchsorted(t_cdf, uT, side='right').clip(0, ev_post.max_total_ev)
 
-        uniqT, inv = np.unique(T_idx, return_inverse=True)
-        C_cache = {int(t): EV_PMF._get_corners(int(t)).astype(float) for t in uniqT}
-
-        EV_mat = np.empty((6, M), dtype=float)
-        for k, t in enumerate(uniqT):
-            sel = (inv == k)
-            # _get_corners returns rows = vertices; use transpose so columns are
-            # vertices when multiplying by weight vectors from W6. The float
-            # allocations are stored in EV_mat and will be rounded per-sample
-            # to enforce exact totals.
-            EV_mat[:, sel] = C_cache[int(t)].T @ W6[:, sel]
-
-        # Round per-sample allocations to integer EVs while enforcing per-sample
-        # totals equal to the sampled T_idx values (and per-stat bounds).
-        EV_int = np.empty((6, M), dtype=int)
+        # Allocate EV by proportional rounding with hard total constraint
+        EV_mat = np.empty((6, M), dtype=int)
         for j in range(M):
-            desired_t = int(T_idx[j])
-            EV_int[:, j] = _round_allocations_to_total(EV_mat[:, j], desired_t, ev_post.max_ev)
-        EV_mat = EV_int
+            t = int(T_idx[j])
+            alloc = t * W6[:, j]
+            EV_mat[:, j] = _round_allocations_to_total(alloc, t, ev_post.max_ev)
 
-        IV_mat = iv_post.sample(M)  # sample from current IV posterior
+        # Sample IVs from current IV posterior
+        IV_mat = iv_post.sample(M)
 
+        # Likelihood
         pred = _predict_stats_batch(EV_mat, IV_mat, base_stats, level, nature)
         if tol == 0:
             w = (pred == obs[:, None]).all(axis=0).astype(float)
@@ -303,31 +282,25 @@ def hybrid_ev_iv_update(
         else:
             w /= Z
 
-        # Update IV posterior from weighted samples
+        # Update IV posterior
         iv_post.weighted_add_(IV_mat, w)
 
-        # Rebuild EV posterior (T and W)
-        totals = EV_mat.sum(axis=0)
-        # rounding of allocations can sometimes produce a total of max_total_ev+1
-        # (e.g., 510 -> 511) due to per-stat rounding; clip to valid index range
-        totals_clipped = np.clip(totals, 0, ev_post.max_total_ev).astype(int)
+        # Rebuild EV posterior (T and W) using weighted particles
+        totals = EV_mat.sum(axis=0).clip(0, ev_post.max_total_ev).astype(int)
         new_T = np.zeros_like(ev_post.T, dtype=float)
-        np.add.at(new_T, totals_clipped, w)
-        new_T = new_T / new_T.sum() if new_T.sum() > 0 else ev_post.T.copy()
+        np.add.at(new_T, totals, w)
+        new_T = (new_T / new_T.sum()) if new_T.sum() > 0 else ev_post.T.copy()
 
-        new_W = np.zeros_like(ev_post.W, dtype=float)
+        # For W, we can either:
+        # (A) use the sampled S5 directly (natural with IS), or
+        # (B) re-derive S5 from EV_mat/totals (robust after rounding).
+        # We'll use (A) for speed and to preserve proposal structure.
         BINS = ev_post.w_bins
-        # Precompute the corners columns used for each sample (based on sampled T)
-        Ccols_per_sample = [C_cache[int(uniqT[inv[j]])].T for j in range(M)]
+        new_W = np.zeros_like(ev_post.W, dtype=float)
+        idx = np.rint(S5 * (BINS - 1)).astype(int).clip(0, BINS - 1)  # (5, M)
+        for r in range(5):
+            np.add.at(new_W[r], idx[r], w)
 
-        for j in range(M):
-            C_cols = Ccols_per_sample[j]
-            w6 = barycentric_simplex(C_cols, EV_mat[:, j].astype(float))
-            s5 = EV_PMF._invert_stick_breaking(w6)
-            idx = np.rint(s5 * (BINS - 1)).astype(int).clip(0, BINS - 1)
-            new_W[np.arange(5), idx] += w[j]
-
-        # normalize rows
         row_sums = new_W.sum(axis=1, keepdims=True)
         new_W = np.divide(new_W, row_sums, out=np.zeros_like(new_W), where=(row_sums > 0))
 
@@ -335,56 +308,45 @@ def hybrid_ev_iv_update(
 
     return ev_post, iv_post
 
+# --------------------------- Single IS update (no alternating) ---------------------------
+
 def update_with_observation(
     prior_ev: EV_PMF,
-    prior_iv: IV_PMF,                 # shape (6, 32), each row sums to 1
-    obs_stats: StatBlock,                 # observed stats at 'level'
+    prior_iv: IV_PMF,
+    obs_stats: StatBlock,
     level: int,
-    base_stats: StatBlock,                # species base stats
-    nature: Nature,                       # shape (6,), values in {0.9,1.0,1.1}
-    M: int = 20000,                       # particles
-    tol: int = 0,                         # per-stat tolerance (0 exact; 1 allows ±1)
+    base_stats: StatBlock,
+    nature: Nature,
+    M: int = 20000,
+    tol: int = 0,
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
-    Importance update with proposal q(EV,IV) = prior_ev × prior_iv.
-    Normalized weights are proportional to P(obs | EV, IV).
-    Returns (posterior_EV_PMF, posterior_IV_6x32).
+    One-shot importance update with proposal q(EV,IV) = prior_ev × prior_iv.
+    Uses stick-breaking sampling only (no corners).
     """
-    nature_multipliers = nature_to_multipliers(nature)
-
     obs = _sb_to_arr(obs_stats)
-    base = _sb_to_arr(base_stats).astype(int)
-    nm = nature_multipliers.astype(float)
 
-    # ----- sample EV from prior_ev -----
-    S5 = prior_ev._sample_S5(M)                          # (5, M)
-    W6 = EV_PMF._stick_breaking_from_unit(S5)            # (6, M)
+    # ----- sample EV from prior_ev via stick-breaking -----
+    S5 = prior_ev._sample_S5(M)                         # (5, M)
+    W6 = EV_PMF._stick_breaking_from_unit(S5)           # (6, M)
 
     # sample totals from T
-    t_cdf = np.cumsum(prior_ev.T)                        # length 511
+    t_cdf = np.cumsum(prior_ev.T)                       # length 511
     t_u = prior_ev.rng.random(M)
     t_idx = np.searchsorted(t_cdf, t_u, side='right').clip(0, prior_ev.max_total_ev)
 
-    # corners cache
-    uniq_T, inv = np.unique(t_idx, return_inverse=True)
-    C_cache = {int(t): EV_PMF._get_corners(int(t)).astype(float) for t in uniq_T}
-
-    EV_mat = np.empty((6, M), dtype=float)
-    for k, t in enumerate(uniq_T):
-        sel = (inv == k)
-        # use transpose of corners so columns correspond to vertex allocations
-        EV_mat[:, sel] = C_cache[int(t)].T @ W6[:, sel]
-
-    EV_int = np.empty((6, M), dtype=int)
+    # allocate EV by proportional rounding with hard total
+    EV_mat = np.empty((6, M), dtype=int)
     for j in range(M):
-        desired_t = int(t_idx[j])
-        EV_int[:, j] = _round_allocations_to_total(EV_mat[:, j], desired_t, prior_ev.max_ev)
-    EV_mat = EV_int
+        t = int(t_idx[j])
+        alloc = t * W6[:, j]
+        EV_mat[:, j] = _round_allocations_to_total(alloc, t, prior_ev.max_ev)
 
+    # ----- sample IV from prior_iv -----
     IV_mat = prior_iv.sample(M)                       # (6, M)
-    pred = _predict_stats_batch(EV_mat, IV_mat, base_stats, level, nature)
 
     # ----- likelihood weights -----
+    pred = _predict_stats_batch(EV_mat, IV_mat, base_stats, level, nature)
     if tol == 0:
         w = (pred == obs[:, None]).all(axis=0).astype(float)
     else:
@@ -392,45 +354,29 @@ def update_with_observation(
 
     Z = w.sum()
     if Z == 0:
-        # soft fallback (prevents degeneracy)
         err = np.abs(pred - obs[:, None]).sum(axis=0)
         lam = 1.0
-        w = np.exp(-lam * err)
-        Z = w.sum()
+        w = np.exp(-lam * err); Z = w.sum()
         w = (w / Z) if Z > 0 else np.full(M, 1.0 / M)
     else:
         w /= Z
 
-    # ----- IV posterior (6 x 32) -----
+    # ----- IV posterior -----
     new_iv = IV_PMF(prior=prior_iv.P, rng=prior_ev.rng)
     new_iv.weighted_add_(IV_mat, w)
 
-    # ----- EV posterior as EV_PMF (T and W rows) -----
-    totals = EV_mat.sum(axis=0)
-    # clip totals to valid index range (rounding can push some totals to max+1)
-    totals_clipped = np.clip(totals, 0, prior_ev.max_total_ev).astype(int)
+    # ----- EV posterior (T and W) -----
+    totals = EV_mat.sum(axis=0).clip(0, prior_ev.max_total_ev).astype(int)
     new_T = np.zeros_like(prior_ev.T, dtype=float)
-    np.add.at(new_T, totals_clipped, w)
-    new_T = new_T / new_T.sum() if new_T.sum() > 0 else prior_ev.T.copy()
+    np.add.at(new_T, totals, w)
+    new_T = (new_T / new_T.sum()) if new_T.sum() > 0 else prior_ev.T.copy()
 
-    new_W = np.zeros_like(prior_ev.W, dtype=float)
     B = prior_ev.w_bins
-    # Precompute corner-columns per sample (based on sampled totals uniq_T/inv)
-    Ccols_per_sample = [C_cache[int(uniq_T[inv[j]])].T.astype(float) for j in range(M)]
-
-    for j in range(M):
-        C_cols = Ccols_per_sample[j]
-        w6 = barycentric_simplex(C_cols, EV_mat[:, j].astype(float))
-        s5 = EV_PMF._invert_stick_breaking(w6)
-        idx = np.rint(s5 * (B - 1)).astype(int).clip(0, B - 1)
-        new_W[np.arange(5), idx] += w[j]
-
-    # now normalize rows
+    new_W = np.zeros_like(prior_ev.W, dtype=float)
+    idx = np.rint(S5 * (B - 1)).astype(int).clip(0, B - 1)  # (5, M)
+    for r in range(5):
+        np.add.at(new_W[r], idx[r], w)
     row_sums = new_W.sum(axis=1, keepdims=True)
     new_W = np.divide(new_W, row_sums, out=np.zeros_like(new_W), where=(row_sums > 0))
-
-    # IV posterior via IV_PMF
-    new_iv = IV_PMF(prior=prior_iv.P, rng=prior_ev.rng)
-    new_iv.weighted_add_(IV_mat, w)
 
     return EV_PMF(priorT=new_T, priorW=new_W, w_bins=B), new_iv

@@ -1,11 +1,13 @@
+#regimen_sim.py
+
 import numpy as np
 from typing import List
 
 from data_structures import *  # Encounter, EncounterOption, TrainingRegimen, TrainingBlock, SpeciesInfo, StatBlock
 from PMFs import EV_PMF
-from PMFs import barycentric_simplex
 
 from matplotlib import pyplot as plt
+
 
 class RegimenSimulator:
     def __init__(self, regimen: TrainingRegimen, species: SpeciesInfo, gen: int, w_bins: int = 506):
@@ -57,44 +59,46 @@ class RegimenSimulator:
             raise ValueError("No samples available. Run simulation first.")
 
         # Pack samples: shape (N, 6)
-        ev_array = np.array([[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in self.samples], dtype=float)
+        ev_array = np.array(
+            [[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in self.samples],
+            dtype=float
+        )
 
         max_ev = 252
         n_stats = 6
         max_total_ev = 2 * max_ev + n_stats  # 510
         B = self.w_bins
-        eps = 1e-12
 
         # ---- 1) PMF over totals T ----
         total_evs = ev_array.sum(axis=1).astype(int)
         T_hist, _ = np.histogram(total_evs, bins=np.arange(0, max_total_ev + 2), density=True)
-        T_hist = T_hist / T_hist.sum()  # safety
+        T_hist = T_hist / max(T_hist.sum(), 1e-12)
 
         # ---- 2) PMFs over stick-breaking variables (5 rows, B bins) ----
+        # Learn W by mapping each sample’s proportion p = EV/T into stick-breaking S, then binning.
         W_counts = np.zeros((5, B), dtype=float)
 
+        # Precompute bin edges/centers
+        # We bin by nearest center i/(B-1); so index = round(s*(B-1))
         for sample in ev_array:
             T = int(round(sample.sum()))
-            # get_corners returns (6,6) rows=vertices; we want columns=vertices for the solver
-            C_cols = EV_PMF._get_corners(T).T  # (6,6)
+            if T <= 0:
+                # All-zero EVs ⇒ put mass on w6 = [0,0,0,0,0,1] ⇒ s = [0,0,0,0,0]
+                S = np.zeros(5, dtype=float)
+            else:
+                p = sample / float(T)                   # proportions on the 6-simplex
+                # Invert stick-breaking: w6 (=p) -> s1..s5 in [0,1]
+                S = EV_PMF._invert_stick_breaking(p.astype(float))
 
-            # Find barycentric weights w (>=0, sum=1) so that C_cols @ w ≈ sample
-            w = barycentric_simplex(C_cols, sample)  # shape (6,)
-
-            # Invert stick-breaking to get s1..s5 in [0,1]
-            S = EV_PMF._invert_stick_breaking(w, eps=eps)  # (5,)
-
-            # Bin each s_k to nearest bin center i/(B-1)
             idx = np.rint(S * (B - 1)).astype(int)
             idx = np.clip(idx, 0, B - 1)
-
             W_counts[np.arange(5), idx] += 1.0
 
-        # Row-wise normalize to get 5 independent pmfs over [0,1]
+        # Normalize rows to get 5 independent pmfs over [0,1]
         row_sums = W_counts.sum(axis=1, keepdims=True)
         W_hist = np.divide(W_counts, row_sums, out=np.zeros_like(W_counts), where=(row_sums > 0))
 
-        return EV_PMF(priorT=T_hist, priorW=W_hist)
+        return EV_PMF(priorT=T_hist, priorW=W_hist, w_bins=B)
 
     def plot_ev_distributions(self):
         ev_array = np.array([[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in self.samples])
