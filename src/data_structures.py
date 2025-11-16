@@ -84,7 +84,7 @@ class StatBlock:
             "defense": self.def_,
             "special_attack": self.spa,
             "special_defense": self.spd,
-            "speed": self.speed,
+            "speed": self.spe,
         }
 
     @classmethod

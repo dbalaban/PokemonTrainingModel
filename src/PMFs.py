@@ -1,3 +1,5 @@
+# PMFs.py
+
 import numpy as np
 from data_structures import *
 from scipy.optimize import minimize
@@ -44,12 +46,50 @@ def project_to_simplex(v):
     return w
 
 class IV_PMF:
-    def __init__(self, prior: Optional[np.array] = None):
-        if not prior is None:
-            assert prior.shape == (6, 32)
-            self.prior = prior
+    def __init__(self, prior: np.ndarray | None = None, rng: np.random.Generator | None = None):
+        # shape (6, 32)
+        self.rng = rng or np.random.default_rng()
+        if prior is None:
+            self.prior = np.full((6, 32), 1/32.0)
         else:
-            self.prior = np.ones((6, 32)) / 32  # uniform prior
+            arr = np.asarray(prior, dtype=float)
+            assert arr.shape == (6, 32)
+            self.prior = arr / arr.sum(axis=1, keepdims=True)
+
+    @property
+    def P(self) -> np.ndarray:
+        return self.prior
+
+    def normalize_(self) -> None:
+        rs = self.prior.sum(axis=1, keepdims=True)
+        np.divide(self.prior, rs, out=self.prior, where=(rs > 0))
+
+    def sample(self, M: int) -> np.ndarray:
+        # returns shape (6, M) IVs in 0..31
+        cdf = np.cumsum(self.prior, axis=1); cdf[:, -1] = 1.0
+        u = self.rng.random((6, M))
+        idx = np.searchsorted(cdf, u, side="right")
+        return np.clip(idx, 0, 31)
+
+    def weighted_add_(self, iv_mat: np.ndarray, w: np.ndarray) -> None:
+        # iv_mat: (6, M), w: (M,)
+        out = np.zeros_like(self.prior)
+        for s in range(6):
+            np.add.at(out[s], iv_mat[s], w)
+        self.prior = out
+        self.normalize_()
+
+    def blend(self, other: "IV_PMF", mode="linear", alpha: float = 0.5) -> "IV_PMF":
+        if mode == "linear":
+            P = alpha*self.P + (1-alpha)*other.P
+        elif mode == "geometric":
+            eps = 1e-12
+            P = np.exp(alpha*np.log(self.P+eps) + (1-alpha)*np.log(other.P+eps))
+        else:
+            raise ValueError("mode must be linear|geometric")
+        out = IV_PMF(P, rng=self.rng)
+        out.normalize_()
+        return out
 
 class EV_PMF:
     def __init__(self, priorT: np.ndarray | None = None, priorW: np.ndarray | None = None,
