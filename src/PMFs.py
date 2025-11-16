@@ -1,5 +1,47 @@
+import Optional
 import numpy as np
 from data_structures import *
+from scipy.optimize import minimize
+
+def barycentric_simplex(C, y):
+    """
+    C: (d,k) matrix whose columns are the 'corners' in R^d
+    y: (d,) target vector
+    returns w in the probability simplex: sum w = 1, w >= 0
+    """
+    k = C.shape[1]
+    # objective
+    def obj(w):
+        r = C @ w - y
+        return 0.5 * r.dot(r)
+
+    # constraints: sum w = 1, and w >= 0 componentwise
+    cons = [
+        {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},
+        {'type': 'ineq', 'fun': lambda w: w}  # each w_i >= 0
+    ]
+    # warm start: least squares projected onto simplex
+    w0_ls, *_ = np.linalg.lstsq(C, y, rcond=None)
+    w0 = project_to_simplex(w0_ls)
+
+    res = minimize(obj, w0, method='SLSQP',
+                   bounds=[(0.0, None)] * k,
+                   constraints=cons)
+    if not res.success:
+        # Fallback: just return the simplex projection of ls
+        return project_to_simplex(w0_ls)
+    return res.x
+
+def project_to_simplex(v):
+    """Euclidean projection onto {w: w>=0, sum w=1} (Duchi et al., 2008)."""
+    v = np.asarray(v)
+    n = v.size
+    u = np.sort(v)[::-1]
+    cssv = np.cumsum(u)
+    rho = np.where(u > (cssv - 1) / (np.arange(n) + 1))[0][-1]
+    theta = (cssv[rho] - 1) / (rho + 1.0)
+    w = np.maximum(v - theta, 0.0)
+    return w
 
 class IV_PMF:
     def __init__(self, prior: Optional[np.array] = None):
@@ -10,75 +52,148 @@ class IV_PMF:
             self.prior = np.ones((6, 32)) / 32  # uniform prior
 
 class EV_PMF:
-    def __init__(self, priorT: Optional[np.array] = None, priorW: Optional[np.array] = None):
+    def __init__(self, priorT: np.ndarray | None = None, priorW: np.ndarray | None = None,
+                 w_bins: int = 506, rng: np.random.Generator | None = None):
         self.max_ev = 252
         self.n_stats = 6
-        # Max total with these rules: 2*252 + 6 = 510
-        self.max_total_ev = 2 * self.max_ev + self.n_stats
-        self.w_bins = 506
+        self.max_total_ev = 2 * self.max_ev + self.n_stats  # 510
+        self.w_bins = w_bins
+        self.rng = rng if rng is not None else np.random.default_rng()
 
-        # self.T - size 511 pmf over total EV values
-        # self.W - 5x506 pmf over T-boundary, assumed conditional independence
-        if not priorT is None:
-            assert priorT.shape == ((self.max_total_ev+1),)
-            self.T = priorT
+        # --- PMF over totals T (shape: 511) ---
+        if priorT is not None:
+            assert priorT.shape == (self.max_total_ev + 1,)
+            self.T = priorT.astype(float)
         else:
-            self.T = np.ones(((self.max_total_ev+1),)) / (self.max_total_ev+1)  # uniform prior
-        
-        if not priorW is None:
-            assert priorW.shape == (5, 506)
-            self.W = priorW
+            self.T = np.full(self.max_total_ev + 1, 1.0 / (self.max_total_ev + 1), dtype=float)
+        self.T /= self.T.sum()
+
+        # --- PMFs over the five stick-breaking variables (shape: 5 x w_bins) ---
+        if priorW is not None:
+            assert priorW.shape == (5, self.w_bins)
+            self.W = priorW.astype(float)
         else:
-            self.W = np.ones((5, 506)) / 506  # uniform prior
+            self.W = np.full((5, self.w_bins), 1.0 / self.w_bins, dtype=float)
 
-    def get_corners(self, T):
+        # normalize each row independently
+        row_sums = self.W.sum(axis=1, keepdims=True)
+        self.W = np.divide(self.W, row_sums, out=self.W, where=(row_sums > 0))
+
+        # fixed bin centers in [0,1]
+        self.s_grid = np.linspace(0.0, 1.0, self.w_bins)
+
+    # ---------- stick-breaking (no sigmoid; inputs already in [0,1]) ----------
+    @staticmethod
+    def _stick_breaking_from_unit(S5: np.ndarray, eps: float = 1e-12) -> np.ndarray:
         """
-        Return 6 canonical vertices on the feasible EV hyperplane:
-            sum(E_i) = T, 0 <= E_i <= max_ev
-        specialized for n_stats = 6.
-
-        The 6 vertices:
-        - are valid allocations
-        - depend on T
-        - can be used with barycentric weights (sum=1, >=0)
-            to define a simplex-based parameterization for some
-            subset of the feasible slice at that T.
-
-        Shape: (6, 6)  [6 vertices, each 6-dimensional].
+        S5: (5, M) with entries in [0,1]; returns W6: (6, M) on the simplex.
         """
-        assert T >= 0
-        assert T <= self.max_total_ev
+        S = np.clip(S5, eps, 1.0 - eps)             # strict interior if desired
+        one_minus = 1.0 - S                         # (5, M)
+        cumprod = np.cumprod(one_minus, axis=0)     # (5, M)
 
-        # Degenerate: only all-zero is possible.
+        W6 = np.empty((6, S.shape[1]), dtype=S.dtype)
+        W6[0] = S[0]
+        W6[1] = cumprod[0] * S[1]
+        W6[2] = cumprod[1] * S[2]
+        W6[3] = cumprod[2] * S[3]
+        W6[4] = cumprod[3] * S[4]
+        W6[5] = cumprod[4]
+        return W6
+
+    @staticmethod
+    def _invert_stick_breaking(w: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+        """
+        Invert stick-breaking: w1..w6 -> s1..s5 in [0,1].
+        """
+        S = np.empty(5, dtype=float)
+        rem = 1.0
+        for k in range(5):
+            if rem <= eps:
+                s_k = 0.0
+            else:
+                s_k = w[k] / rem
+            S[k] = np.clip(s_k, 0.0, 1.0)
+            rem *= (1.0 - S[k])
+        # Optionally: assert np.allclose(w[5], rem, atol=1e-8)
+        return S
+
+    @staticmethod
+    def _get_corners(T: int) -> np.ndarray:
+        max_ev = 252
+        n_stats = 6
+        max_total_ev = 2 * max_ev + n_stats
+        assert 0 <= T <= max_total_ev
+
         if T == 0:
-            return np.zeros((self.n_stats, self.n_stats), dtype=int)
+            return np.zeros((n_stats, n_stats), dtype=int)
 
-        # Case 1: T <= max_ev
-        # Vertices: put all T into exactly one stat.
-        if T <= self.max_ev:
-            V = np.zeros((self.n_stats, self.n_stats), dtype=int)
-            idx = np.arange( self.n_stats)
+        if T <= max_ev:
+            V = np.zeros((n_stats, n_stats), dtype=int)
+            idx = np.arange(n_stats)
             V[idx, idx] = T
             return V
 
-        # Case 2: max_ev < T <= 2 * max_ev
-        # Vertices: [max_ev, T-max_ev, 0, 0, 0, 0] and cyclic permutations.
-        if T <= 2 *  self.max_ev:
-            rest = T -  self.max_ev  # in (0, max_ev]
-            base = np.zeros( self.n_stats, dtype=int)
-            base[0] =  self.max_ev
+        if T <= 2 * max_ev:
+            rest = T - max_ev
+            base = np.zeros(n_stats, dtype=int)
+            base[0] = max_ev
             base[1] = rest
-            # Roll base 0..5 to generate 6 symmetric vertices
-            V = np.vstack([np.roll(base, shift=i) for i in range( self.n_stats)])
-            return V
+            return np.vstack([np.roll(base, i) for i in range(n_stats)])
 
-        # Case 3: 2 * max_ev < T <= max_total (510)
-        # Vertices: [max_ev, max_ev, T-2*max_ev, 0, 0, 0] and cyclic perms.
-        leftover = T - 2 *  self.max_ev  # in [1, 6]
-        base = np.zeros( self.n_stats, dtype=int)
-        base[0] =  self.max_ev
-        base[1] =  self.max_ev
+        leftover = T - 2 * max_ev  # in [1, 6]
+        base = np.zeros(n_stats, dtype=int)
+        base[0] = max_ev
+        base[1] = max_ev
         base[2] = leftover
-        V = np.vstack([np.roll(base, shift=i) for i in range( self.n_stats)])
-        return V
-    
+        return np.vstack([np.roll(base, i) for i in range(n_stats)])
+
+    # ---------- sample S ~ independent row PMFs over s_grid ----------
+    def _sample_S5(self, M: int) -> np.ndarray:
+        """
+        Draw M i.i.d. samples of S = (s1..s5) from independent discrete pmfs in self.W.
+        Returns S5 of shape (5, M) with values in [0,1] from self.s_grid.
+        """
+        # cumulative CDFs for each row
+        cdfs = np.cumsum(self.W, axis=1)                        # (5, B)
+        u = self.rng.random((5, M))
+        # inverse CDF via searchsorted
+        idx = np.minimum(np.searchsorted(cdfs, u, side='right'), self.w_bins - 1)
+        # map indices to bin centers
+        S5 = self.s_grid[idx]                                    # (5, M)
+        return S5
+
+    # ---------- marginals via Monte Carlo over S (fast & vectorized) ----------
+    def getMarginals(self, mc_samples: int = 5000) -> np.ndarray:
+        """
+        Returns marginals[stat, ev] = P(stat has EV=ev). Shape: (6, max_ev+1).
+        Approximates the integral over S1..S5 using Monte Carlo samples drawn from
+        the independent pmfs in self.W. Larger mc_samples => better accuracy.
+        """
+        nS, maxEV, maxT = self.n_stats, self.max_ev, self.max_total_ev
+
+        # Draw S samples once, build W6 via stick-breaking
+        S5 = self._sample_S5(mc_samples)                         # (5, M)
+        W6 = self._stick_breaking_from_unit(S5)                  # (6, M)
+
+        marginals = np.zeros((nS, maxEV + 1), dtype=float)
+
+        # Loop only over totals; vectorize over M samples
+        for t in range(maxT + 1):
+            C = self._get_corners(t).astype(float)                # (6, 6)
+            ev_alloc = C @ W6                                    # (6, M)
+            ev_idx = np.rint(ev_alloc).astype(int)
+            np.clip(ev_idx, 0, maxEV, out=ev_idx)
+
+            # Each sample has weight T[t] / M (since samples ~ P(S))
+            w = self.T[t] / mc_samples
+
+            rows = np.repeat(np.arange(nS), mc_samples)          # (6*M,)
+            cols = ev_idx.reshape(-1)                            # (6*M,)
+            vals = np.full(6 * mc_samples, w, dtype=float)
+            np.add.at(marginals, (rows, cols), vals)
+
+        # Normalize per-stat for numerical safety
+        s = marginals.sum(axis=1, keepdims=True)
+        np.divide(marginals, s, out=marginals, where=(s > 0))
+        return marginals

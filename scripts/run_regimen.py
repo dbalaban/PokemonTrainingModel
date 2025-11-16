@@ -162,5 +162,9 @@ def main():
     # show histogram of EV distributions
     model.plot_ev_distributions()
 
+    # test the PMF representation
+    ev_pmf = model.toPMF()
+    
+
 if __name__ == "__main__":
     main()
