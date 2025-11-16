@@ -1,7 +1,7 @@
-import Optional
 import numpy as np
 from data_structures import *
 from scipy.optimize import minimize
+from typing import Optional
 
 def barycentric_simplex(C, y):
     """
@@ -154,14 +154,20 @@ class EV_PMF:
         Draw M i.i.d. samples of S = (s1..s5) from independent discrete pmfs in self.W.
         Returns S5 of shape (5, M) with values in [0,1] from self.s_grid.
         """
-        # cumulative CDFs for each row
-        cdfs = np.cumsum(self.W, axis=1)                        # (5, B)
+        B = self.w_bins
+        # ensure each row is a valid CDF ending at 1
+        row_sums = self.W.sum(axis=1, keepdims=True)
+        W_row = np.divide(self.W, row_sums, out=np.zeros_like(self.W), where=(row_sums > 0))
+        cdfs = np.cumsum(W_row, axis=1)
+        cdfs[:, -1] = 1.0  # guard against tiny float drift
+
         u = self.rng.random((5, M))
-        # inverse CDF via searchsorted
-        idx = np.minimum(np.searchsorted(cdfs, u, side='right'), self.w_bins - 1)
-        # map indices to bin centers
-        S5 = self.s_grid[idx]                                    # (5, M)
-        return S5
+        idx = np.empty((5, M), dtype=int)
+        for r in range(5):
+            idx[r] = np.searchsorted(cdfs[r], u[r], side='right')
+        idx = np.minimum(idx, B - 1)
+
+        return self.s_grid[idx]
 
     # ---------- marginals via Monte Carlo over S (fast & vectorized) ----------
     def getMarginals(self, mc_samples: int = 5000) -> np.ndarray:

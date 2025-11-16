@@ -150,21 +150,30 @@ def main():
     num_trials = 10000
     model.run_simulation(num_trials=num_trials, exp_start=0)
 
-    ev_pmf = model.get_ev_stats()
-
-    print("Total EV PMF after training regimen:")
-    print("EV Total\tProbability")
-    for ev_total in range(ev_pmf.max_total_ev + 1):
-        prob = ev_pmf.T[ev_total]
-        if prob > 0:
-            print(f"{ev_total}\t\t{prob:.4f}")
-
     # show histogram of EV distributions
     model.plot_ev_distributions()
 
     # test the PMF representation
     ev_pmf = model.toPMF()
-    
+    marginals = ev_pmf.getMarginals()
+    # transform samples from model into marginals
+    samples = np.array([[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in model.samples], dtype=float)
+    sample_marginals = []
+    for stat_idx in range(6):
+        counts, bin_edges = np.histogram(samples[:, stat_idx], bins=range(0, 254), density=True)
+        sample_marginals.append(counts)
+    sample_marginals = np.array(sample_marginals)  # shape (6, 253)
+    # normalize sample marginals to probabilities
+    sample_marginals = sample_marginals / sample_marginals.sum(axis=1, keepdims=True)
+    # compare
+    for stat_idx, stat_name in enumerate(['HP', 'Attack', 'Defense', 'Sp. Atk', 'Sp. Def', 'Speed']):
+        print(f"\nMarginal distribution for {stat_name}:")
+        print("EV Value\tPMF Probability\tSample Probability")
+        for ev_value in range(253):
+            pmf_prob = marginals[stat_idx][ev_value]
+            sample_prob = sample_marginals[stat_idx][ev_value]
+            if pmf_prob > 0 or sample_prob > 0:
+                print(f"{ev_value}\t\t{pmf_prob:.4f}\t\t{sample_prob:.4f}")
 
 if __name__ == "__main__":
     main()
