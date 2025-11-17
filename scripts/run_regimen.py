@@ -153,8 +153,10 @@ def main():
     model.plot_ev_distributions()
 
     # test the PMF representation
-    ev_pmf = model.toPMF()
-    marginals = ev_pmf.getMarginals()
+    ev_pmf_multi = model.toPMF(allocator="multinomial")
+    ev_pmf_round = model.toPMF(allocator="round")
+    marginals_multi = ev_pmf_multi.getMarginals()
+    marginals_round = ev_pmf_round.getMarginals()
     # transform samples from model into marginals
     samples = np.array([[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in model.samples], dtype=float)
     sample_marginals = []
@@ -167,12 +169,13 @@ def main():
     # compare
     for stat_idx, stat_name in enumerate(['HP', 'Attack', 'Defense', 'Sp. Atk', 'Sp. Def', 'Speed']):
         print(f"\nMarginal distribution for {stat_name}:")
-        print("EV Value\tPMF Probability\tSample Probability")
+        print("EV Value\tPMF (Multi) Probability\tPMF (round) Probability\tSample Probability")
         for ev_value in range(253):
-            pmf_prob = marginals[stat_idx][ev_value]
+            pmf_prob_multi = marginals_multi[stat_idx][ev_value]
+            pmf_prob_round = marginals_round[stat_idx][ev_value]
             sample_prob = sample_marginals[stat_idx][ev_value]
-            if pmf_prob > 0 or sample_prob > 0:
-                print(f"{ev_value}\t\t{pmf_prob:.4f}\t\t{sample_prob:.4f}")
+            if pmf_prob_multi > 0 or pmf_prob_round > 0 or sample_prob > 0:
+                print(f"{ev_value}\t\t{pmf_prob_multi:.4f}\t\t{pmf_prob_round:.4f}\t\t{sample_prob:.4f}")
 
 if __name__ == "__main__":
     main()

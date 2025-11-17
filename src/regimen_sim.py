@@ -10,12 +10,11 @@ from matplotlib import pyplot as plt
 
 
 class RegimenSimulator:
-    def __init__(self, regimen: TrainingRegimen, species: SpeciesInfo, gen: int, w_bins: int = 506):
+    def __init__(self, regimen: TrainingRegimen, species: SpeciesInfo, gen: int):
         self.regimen = regimen
         self.species = species
         self.gen = gen
         self.samples: List[StatBlock] = []
-        self.w_bins = w_bins
 
     def randomEncounter(self, encounters: List[EncounterOption]) -> Encounter:
         rates = np.array([enc.weight for enc in encounters], dtype=float)
@@ -54,7 +53,7 @@ class RegimenSimulator:
             self.samples.append(ev_gains)
         return self.samples
 
-    def toPMF(self) -> EV_PMF:
+    def toPMF(self, allocator="multinomial") -> EV_PMF:
         if len(self.samples) == 0:
             raise ValueError("No samples available. Run simulation first.")
 
@@ -63,42 +62,8 @@ class RegimenSimulator:
             [[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in self.samples],
             dtype=float
         )
-
-        max_ev = 252
-        n_stats = 6
-        max_total_ev = 2 * max_ev + n_stats  # 510
-        B = self.w_bins
-
-        # ---- 1) PMF over totals T ----
-        total_evs = ev_array.sum(axis=1).astype(int)
-        T_hist, _ = np.histogram(total_evs, bins=np.arange(0, max_total_ev + 2), density=True)
-        T_hist = T_hist / max(T_hist.sum(), 1e-12)
-
-        # ---- 2) PMFs over stick-breaking variables (5 rows, B bins) ----
-        # Learn W by mapping each sample’s proportion p = EV/T into stick-breaking S, then binning.
-        W_counts = np.zeros((5, B), dtype=float)
-
-        # Precompute bin edges/centers
-        # We bin by nearest center i/(B-1); so index = round(s*(B-1))
-        for sample in ev_array:
-            T = int(round(sample.sum()))
-            if T <= 0:
-                # All-zero EVs ⇒ put mass on w6 = [0,0,0,0,0,1] ⇒ s = [0,0,0,0,0]
-                S = np.zeros(5, dtype=float)
-            else:
-                p = sample / float(T)                   # proportions on the 6-simplex
-                # Invert stick-breaking: w6 (=p) -> s1..s5 in [0,1]
-                S = EV_PMF._invert_stick_breaking(p.astype(float))
-
-            idx = np.rint(S * (B - 1)).astype(int)
-            idx = np.clip(idx, 0, B - 1)
-            W_counts[np.arange(5), idx] += 1.0
-
-        # Normalize rows to get 5 independent pmfs over [0,1]
-        row_sums = W_counts.sum(axis=1, keepdims=True)
-        W_hist = np.divide(W_counts, row_sums, out=np.zeros_like(W_counts), where=(row_sums > 0))
-
-        return EV_PMF(priorT=T_hist, priorW=W_hist, w_bins=B)
+        
+        return EV_PMF.from_samples(ev_array, allocator=allocator)
 
     def plot_ev_distributions(self):
         ev_array = np.array([[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in self.samples])

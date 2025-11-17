@@ -126,11 +126,8 @@ def feasible_ev_mask_for_stat(
 
     return _ev_mask_from_k_set(np.asarray(k_list, dtype=int))
 
-
-def _predict_stats_batch(
-    EV: np.ndarray, IV: np.ndarray, base: StatBlock, level: int, nature: Nature
-) -> np.ndarray:
-    B = np.array([base.hp, base.atk, base.def_, base.spa, base.spd, base.spe], dtype=int)
+def _predict_stats_batch(EV: np.ndarray, IV: np.ndarray, base: StatBlock, level: int, nature: Nature) -> np.ndarray:
+    B = np.array([base.hp, base.atk, base.def_, base.spa, base.spd, base.spe], dtype=int)[:, None]  # (6,1)
     nm = np.array([
         1.0,
         nature.modifier(StatType.ATTACK),
@@ -138,51 +135,15 @@ def _predict_stats_batch(
         nature.modifier(StatType.SPECIAL_ATTACK),
         nature.modifier(StatType.SPECIAL_DEFENSE),
         nature.modifier(StatType.SPEED),
-    ], dtype=float)
+    ], dtype=float)[:, None]  # (6,1)
+
+    EV4 = EV // 4
+    term = ((2 * B + IV + EV4) * level) // 100              # (6, M)
 
     out = np.empty_like(EV, dtype=int)
-    hp_term = ((2 * B[0] + IV[0] + (EV[0] // 4)) * level) // 100
-    out[0] = hp_term + level + 10
-    for s in range(1, 6):
-        term = ((2 * B[s] + IV[s] + (EV[s] // 4)) * level) // 100
-        core = term + 5
-        out[s] = np.floor(core * nm[s]).astype(int)
-    return out
-
-
-def _round_allocations_to_total(ev_alloc: np.ndarray, desired_total: int, max_ev: int) -> np.ndarray:
-    """
-    Given a float allocation vector `ev_alloc` (length 6) whose exact sum equals
-    `desired_total` up to floating error, produce an integer vector in [0,max_ev]
-    whose sum equals `desired_total` by floor+largest-remainder rounding while
-    respecting per-stat bounds.
-    """
-    ev_alloc = np.maximum(ev_alloc, 0.0)
-    ev_floor = np.floor(ev_alloc).astype(int)
-    ev_floor = np.clip(ev_floor, 0, max_ev)
-    rem = int(desired_total - ev_floor.sum())
-    if rem == 0:
-        return ev_floor
-
-    remainders = ev_alloc - np.floor(ev_alloc)
-    idx_order = np.argsort(-remainders)
-    out = ev_floor.copy()
-    for i in idx_order:
-        if rem <= 0:
-            break
-        if out[i] < max_ev:
-            out[i] += 1
-            rem -= 1
-
-    if rem > 0:
-        for i in range(6):
-            if rem <= 0:
-                break
-            if out[i] < max_ev:
-                add = min(max_ev - out[i], rem)
-                out[i] += add
-                rem -= add
-
+    out[0] = term[0] + level + 10
+    core = term[1:] + 5
+    out[1:] = np.floor(core * nm[1:]).astype(int)
     return out
 
 # --------------------------- Alternating hybrid update ---------------------------
@@ -257,11 +218,8 @@ def hybrid_ev_iv_update(
         T_idx = np.searchsorted(t_cdf, uT, side='right').clip(0, ev_post.max_total_ev)
 
         # Allocate EV by proportional rounding with hard total constraint
-        EV_mat = np.empty((6, M), dtype=int)
-        for j in range(M):
-            t = int(T_idx[j])
-            alloc = t * W6[:, j]
-            EV_mat[:, j] = _round_allocations_to_total(alloc, t, ev_post.max_ev)
+        alloc = W6 * T_idx[None, :]
+        EV_mat = EV_PMF._round_allocations_to_totals(alloc, T_idx, prior_ev.max_ev)  # (6, M) ints
 
         # Sample IVs from current IV posterior
         IV_mat = iv_post.sample(M)
@@ -287,19 +245,15 @@ def hybrid_ev_iv_update(
 
         # Rebuild EV posterior (T and W) using weighted particles
         totals = EV_mat.sum(axis=0).clip(0, ev_post.max_total_ev).astype(int)
-        new_T = np.zeros_like(ev_post.T, dtype=float)
-        np.add.at(new_T, totals, w)
+        new_T = np.bincount(totals, weights=w, minlength=ev_post.max_total_ev + 1)
         new_T = (new_T / new_T.sum()) if new_T.sum() > 0 else ev_post.T.copy()
 
-        # For W, we can either:
-        # (A) use the sampled S5 directly (natural with IS), or
-        # (B) re-derive S5 from EV_mat/totals (robust after rounding).
-        # We'll use (A) for speed and to preserve proposal structure.
+        # Use sampled S5 to update W (fast + consistent with proposal)
         BINS = ev_post.w_bins
-        new_W = np.zeros_like(ev_post.W, dtype=float)
         idx = np.rint(S5 * (BINS - 1)).astype(int).clip(0, BINS - 1)  # (5, M)
-        for r in range(5):
-            np.add.at(new_W[r], idx[r], w)
+        new_W = np.zeros_like(ev_post.W, dtype=float)
+        for r in range(5):  # fixed small loop
+            new_W[r] = np.bincount(idx[r], weights=w, minlength=BINS)
 
         row_sums = new_W.sum(axis=1, keepdims=True)
         new_W = np.divide(new_W, row_sums, out=np.zeros_like(new_W), where=(row_sums > 0))
@@ -333,15 +287,11 @@ def update_with_observation(
     # sample totals from T
     t_cdf = np.cumsum(prior_ev.T)                       # length 511
     t_u = prior_ev.rng.random(M)
-    t_idx = np.searchsorted(t_cdf, t_u, side='right').clip(0, prior_ev.max_total_ev)
+    T_idx = np.searchsorted(t_cdf, t_u, side='right').clip(0, prior_ev.max_total_ev)
 
     # allocate EV by proportional rounding with hard total
-    EV_mat = np.empty((6, M), dtype=int)
-    for j in range(M):
-        t = int(t_idx[j])
-        alloc = t * W6[:, j]
-        EV_mat[:, j] = _round_allocations_to_total(alloc, t, prior_ev.max_ev)
-
+    alloc = W6 * T_idx[None, :]
+    EV_mat = EV_PMF._round_allocations_to_totals(alloc, T_idx, prior_ev.max_ev)  # (6, M) ints
     # ----- sample IV from prior_iv -----
     IV_mat = prior_iv.sample(M)                       # (6, M)
 
@@ -367,8 +317,7 @@ def update_with_observation(
 
     # ----- EV posterior (T and W) -----
     totals = EV_mat.sum(axis=0).clip(0, prior_ev.max_total_ev).astype(int)
-    new_T = np.zeros_like(prior_ev.T, dtype=float)
-    np.add.at(new_T, totals, w)
+    new_T = np.bincount(totals, weights=w, minlength=prior_ev.max_total_ev + 1)
     new_T = (new_T / new_T.sum()) if new_T.sum() > 0 else prior_ev.T.copy()
 
     B = prior_ev.w_bins

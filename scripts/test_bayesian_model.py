@@ -1,6 +1,7 @@
 # scripts/test_bayes.py
 import numpy as np
 from typing import Tuple
+from scipy.stats import entropy, wasserstein_distance
 
 # Project imports
 from PMFs import EV_PMF, IV_PMF
@@ -49,6 +50,58 @@ def mass_near_ev(marg_row: np.ndarray, ev_star: int, window: int = 1) -> float:
     hi = min(len(marg_row) - 1, ev_star + window)
     return float(marg_row[lo:hi+1].sum())
 
+def _normalize_safe(p, eps=1e-12):
+    p = np.asarray(p, dtype=float)
+    s = p.sum()
+    if s <= 0:
+        return np.full_like(p, 1.0/len(p))
+    return p / s
+
+def _js_divergence(p, q, eps=1e-12):
+    # p, q already normalized histograms
+    p = np.clip(p, eps, 1.0); p /= p.sum()
+    q = np.clip(q, eps, 1.0); q /= q.sum()
+    m = 0.5*(p+q)
+    return 0.5*entropy(p, m) + 0.5*entropy(q, m)  # natural log base
+
+def compare_discrete_hist(p_counts, q_counts):
+    # Both over same bins. Returns dict with TV, sqrtJS, Hellinger, L1.
+    p = _normalize_safe(p_counts)
+    q = _normalize_safe(q_counts)
+    l1 = float(np.abs(p - q).sum())
+    tv = 0.5 * l1
+    js = _js_divergence(p, q)
+    sqrt_js = float(np.sqrt(js))  # in [0,1]
+    # Hellinger
+    hell = float(np.sqrt(0.5 * np.square(np.sqrt(p) - np.sqrt(q)).sum()))
+    return {"L1": l1, "TV": tv, "sqrtJS": sqrt_js, "Hellinger": hell}
+
+def compare_ev_distributions(ev_true, ev_from_pmf):
+    # ev_true, ev_from_pmf: (N,6) integer EV samples
+    names = ['HP','Attack','Defense','Sp. Atk','Sp. Def','Speed']
+    print("=== Per-stat distribution distances ===")
+    for i, name in enumerate(names):
+        p_counts, _ = np.histogram(ev_true[:, i], bins=range(0, 254), density=False)
+        q_counts, _ = np.histogram(ev_from_pmf[:, i], bins=range(0, 254), density=False)
+        d = compare_discrete_hist(p_counts, q_counts)
+        # Wasserstein (needs bin positions)
+        w1 = wasserstein_distance(np.arange(253), np.arange(253), p_counts, q_counts)
+        print(f"{name:10s} TV={d['TV']:.3f}  √JS={d['sqrtJS']:.3f}  Hell={d['Hellinger']:.3f}  W1={w1:.2f} EV")
+    # Totals T
+    T_true = ev_true.sum(axis=1)
+    T_pmf  = ev_from_pmf.sum(axis=1)
+    pT, _ = np.histogram(T_true, bins=np.arange(0, 512), density=False)
+    qT, _ = np.histogram(T_pmf,  bins=np.arange(0, 512), density=False)
+    dT = compare_discrete_hist(pT, qT)
+    w1T = wasserstein_distance(np.arange(511), np.arange(511), pT, qT)
+    print(f"{'Total EVs':10s} TV={dT['TV']:.3f}  √JS={dT['sqrtJS']:.3f}  Hell={dT['Hellinger']:.3f}  W1={w1T:.2f} EV")
+
+    # Optional: correlation structure check (Pearson)
+    C_true = np.corrcoef(ev_true, rowvar=False)
+    C_pmf  = np.corrcoef(ev_from_pmf, rowvar=False)
+    corr_l1 = np.abs(C_true - C_pmf)[np.triu_indices(6, k=1)].mean()
+    print(f"Mean abs diff of off-diag correlations: {corr_l1:.3f}")
+
 # -----------------------------
 # Main test
 # -----------------------------
@@ -85,6 +138,59 @@ def main():
     print("Observed stats:", obs_stats_arr.tolist())
     print()
 
+    # Sanity Check: Map True EVs to PMF representation and back
+    print("=== Sanity Check: EV PMF representation ===")
+    ev_star_samples = np.array(ev_star, dtype=float).reshape(1, 6)  # shape (1,6)
+    ev_pmf_star = EV_PMF.from_samples(ev_star_samples, allocator="round")
+    ev_marginals_star = ev_pmf_star.getMarginals(mc_samples=10000)
+    ev_recovered = []
+    for stat_idx in range(6):
+        counts, bin_edges = np.histogram(ev_star_samples[:, stat_idx], bins=range(0, 254), density=True)
+        ev_recovered.append(counts)
+    ev_recovered = np.array(ev_recovered)  # shape (6, 253)
+    # normalize to probabilities
+    ev_recovered = ev_recovered / ev_recovered.sum(axis=1, keepdims=True)
+    # compare
+    # Report EV marginal mass at ground-truth EVs
+    ev_hit_star = [mass_near_ev(ev_marginals_star[s], int(ev_star[s]), window=0) for s in range(6)]
+    print("EV* PMF mass at true EV per stat:", [f"{p:.3f}" for p in ev_hit_star])
+    print(f"Mean EV mass at truth: {np.mean(ev_hit_star):.3f}")
+    print()
+
+    # verify that sampels drawn from ev_pmf_star are always equal to ev_star
+    samples_drawn = ev_pmf_star.sample(M=1000)  # shape (1000, 6)
+    all_match = np.all(samples_drawn == ev_star.reshape(1, 6))
+    print(f"All samples drawn from EV PMF match EV*: {all_match}")
+    print()
+
+    print("=== Distribution Recovery Tests ===")
+    # generate a random sample of EVs, build and sample PMF, compare to drawn distribution
+    num_test_samples = 10000
+    ev_test_samples = np.array([rng_ev_vector(rng, max_ev=252, max_total=510) for _ in range(num_test_samples)], dtype=float)  # shape (N,6)
+    ev_test_pmf_multinomial = EV_PMF.from_samples(ev_test_samples, allocator="multinomial")
+    ev_test_pmf_round = EV_PMF.from_samples(ev_test_samples, allocator="round")
+    ev_test_pmf_multinomial_samples = ev_test_pmf_multinomial.sample(M=num_test_samples)  # shape (N,6)
+    ev_test_pmf_round_samples = ev_test_pmf_round.sample(M=num_test_samples)      # shape (N,6)
+    print("-> multinomial allocator:")
+    compare_ev_distributions(ev_test_samples, ev_test_pmf_multinomial_samples)
+    print("-> Round allocator:")
+    compare_ev_distributions(ev_test_samples, ev_test_pmf_round_samples)
+    print()
+
+    print("=== Prior distributions ===")
+    # Report prior mass at the ground-truth IVs
+    iv_prior_mass = [prior_iv.P[s, iv_star[s]] for s in range(6)]
+    print("Prior IV mass at true IV per stat:", [f"{p:.3f}" for p in iv_prior_mass])
+    print(f"Mean IV mass at truth: {np.mean(iv_prior_mass):.3f}")
+    print()
+
+    # Report prior EV marginal mass near ground-truth (±1)
+    ev_marg_prior = prior_ev.getMarginals(mc_samples=10000)  # (6, 253)
+    ev_prior_hit = [mass_near_ev(ev_marg_prior[s], int(ev_star[s]), window=1) for s in range(6)]
+    print("Prior EV mass near true EV (±1) per stat:", [f"{p:.3f}" for p in ev_prior_hit])
+    print(f"Mean EV mass near truth: {np.mean(ev_prior_hit):.3f}")
+    print()
+
     # --- Test 1: Single-step importance update ---
     print("=== Test 1: update_with_observation (single IS step) ===")
     post_ev_1, post_iv_1 = update_with_observation(
@@ -94,8 +200,8 @@ def main():
         level=level,
         base_stats=base_stats,
         nature=nature,
-        M=300000,          # more particles -> tighter posterior
-        tol=1,            # exact match; consider tol=1 for robustness
+        M=3000000,          # more particles -> tighter posterior
+        tol=0,            # exact match; consider tol=1 for robustness
     )
     iv_post_1 = post_iv_1.P  # (6, 32)
 
@@ -120,7 +226,7 @@ def main():
         level=level,
         base_stats=base_stats,
         nature=nature,
-        mc_particles=20000,
+        mc_particles=2000000,
         tol=0,
         max_iters=5,
         iv_tv_tol=1e-4,
