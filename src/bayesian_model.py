@@ -346,8 +346,10 @@ def analytic_update_with_observation(
     # ----- 3) weights: log w = log P(IV) + log P(EV) -----
     # Shapes: (M,)
     logP_E = prior_ev.getProb(EV_mat.T, asLog=True)           # (M,)
-    logP_IV = prior_iv.getLogProb(IV_mat.T)                    # (M,)
+    logP_IV = prior_iv.getLogProb(IV_mat)                     # (M,) — IV_mat is already (6,M)
     logw = logP_E + logP_IV
+
+    print(f"there are {np.sum(col_valid)}/{len(col_valid)} valid samples")
 
     # Any invalid columns ⇒ zero weight (−inf in log)
     logw = np.where(col_valid, logw, -np.inf)

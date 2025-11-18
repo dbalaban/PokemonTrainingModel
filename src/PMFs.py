@@ -75,7 +75,7 @@ class IV_PMF:
             idx[s] = np.searchsorted(cdf[s], u[s], side="right")
         return np.clip(idx, 0, 31)
 
-    def getProb(self, IV : ndarray): -> ndarray
+    def getProb(self, IV : ndarray) -> ndarray:
         """
         Return P(IV) under this PMF
         IV: Nx6 array
@@ -93,11 +93,9 @@ class IV_PMF:
         Out-of-range IV indices are treated as probability 0 → -inf.
         """
         idx = np.asarray(IV, dtype=int)
-        if idx.ndim == 1:
+        scalar_input = idx.ndim == 1
+        if scalar_input:
             idx = idx[:, None]  # (6,1) for uniform handling
-
-        # rows index (6,1) broadcasts across columns of idx (6,M)
-        rows = np.arange(6)[:, None]
 
         # log of prior with proper handling of zeros: log(0) -> -inf
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -107,8 +105,10 @@ class IV_PMF:
         invalid = (idx < 0) | (idx > 31)
         idx_safe = np.clip(idx, 0, 31)
 
-        # gather per-row log-probs → (6, M)
-        gathered = logP[rows, idx_safe]
+        # gather per-row log-probs: for each row s and column m, get logP[s, idx_safe[s, m]]
+        gathered = np.empty_like(idx, dtype=float)
+        for s in range(6):
+            gathered[s] = logP[s, idx_safe[s]]
 
         # force invalid selections to -inf
         gathered = np.where(invalid, -np.inf, gathered)
@@ -117,7 +117,7 @@ class IV_PMF:
         out = gathered.sum(axis=0)
 
         # if single vector input, return scalar
-        return out[0] if out.size == 1 else out
+        return out[0] if scalar_input else out
 
     def weighted_add_(self, iv_mat: np.ndarray, w: np.ndarray) -> None:
         out = np.zeros_like(self.prior)
@@ -451,9 +451,17 @@ class EV_PMF:
         idx = np.rint(S5 * (B - 1)).astype(int)
         np.clip(idx, 0, B - 1, out=idx)  # (K,5)
 
+        # Extract W values at binned indices W[r, idx[i,r]] for each row r and sample i
+        # W is (5, B), idx is (K, 5); we want to extract W[r, idx[i,r]] for each r in 0..4, i in 0..K-1
+        K = idx.shape[0]
+        W_rows = np.empty((K, 5), dtype=float)
+        for r in range(5):
+            W_rows[:, r] = self.W[r, idx[:, r]]
+        any_zero = np.any(W_rows == 0, axis=1)  # (K,) bool
+
         # Sum row-wise log-probs: sum_r log W[r, idx_r]
         with np.errstate(divide="ignore", invalid="ignore"):
-            row_log = np.sum(np.log(np.clip(W_rows, 1e-300, 1.0)), axis=0)  # (K,)
+            row_log = np.sum(np.log(np.clip(W_rows, 1e-300, 1.0)), axis=1)  # (K,)
             row_log[any_zero] = -np.inf
 
         # Combine for valid rows

@@ -8,6 +8,7 @@ from PMFs import EV_PMF, IV_PMF
 from bayesian_model import (
     update_with_observation,
     hybrid_ev_iv_update,
+    analytic_update_with_observation,
     _predict_stats_batch,
     feasible_ev_mask_for_stat
 )
@@ -289,7 +290,7 @@ def main():
         level=level,
         base_stats=base_stats,
         nature=nature,
-        M=3000000,          # more particles -> tighter posterior
+        M=30000,          # more particles -> tighter posterior
         tol=0,            # exact match; consider tol=1 for robustness
     )
     iv_post_1 = post_iv_1.P  # (6, 32)
@@ -315,7 +316,7 @@ def main():
         level=level,
         base_stats=base_stats,
         nature=nature,
-        mc_particles=2000000,
+        mc_particles=20000,
         tol=0,
         max_iters=5,
         iv_tv_tol=1e-4,
@@ -332,6 +333,32 @@ def main():
     print(f"Mean EV mass near truth (hybrid): {np.mean(ev_hit2):.3f}")
 
     print("\nDone.")
+
+    # --- Test 3: Analytic Importance Update
+    print("=== Test 3: analytic_update_with_observation ===")
+    post_ev_3, post_iv_3 = analytic_update_with_observation(
+        prior_ev=prior_ev,
+        prior_iv=prior_iv,
+        obs_stats=obs_stats,
+        level=level,
+        base_stats=base_stats,
+        nature=nature,
+        M=10000          # more particles -> tighter posterior
+    )
+
+    iv_post_3 = post_iv_3.P  # (6, 32)
+
+    # Report IV posterior mass at the ground-truth IVs
+    iv_hit3 = [iv_post_3[s, iv_star[s]] for s in range(6)]
+    print("Posterior IV mass at true IV per stat:", [f"{p:.3f}" for p in iv_hit3])
+    print(f"Mean IV mass at truth: {np.mean(iv_hit3):.3f}")
+
+    # Report EV marginal mass near ground-truth (±1)
+    ev_marg_3 = post_ev_3.getMarginals(mc_samples=10000)  # (6, 253)
+    ev_hit3 = [mass_near_ev(ev_marg_3[s], int(ev_star[s]), window=1) for s in range(6)]
+    print("Posterior EV mass near true EV (±1) per stat:", [f"{p:.3f}" for p in ev_hit3])
+    print(f"Mean EV mass near truth: {np.mean(ev_hit3):.3f}")
+    print()
 
 if __name__ == "__main__":
     main()
