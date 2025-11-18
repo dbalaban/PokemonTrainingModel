@@ -446,33 +446,61 @@ def track_training_stats(
             obs_by_level[obs.level] = []
         obs_by_level[obs.level].append(obs)
     
-    # 6. Iterate over blocks
+    # 6. Group blocks into regimens between observations
+    # Each regimen runs from start (or previous observation) to next observation
+    regimen_groups = []
+    current_group = []
+    
+    for block in split_regimen.blocks:
+        current_group.append(block)
+        # If this block ends at an observation level, close the group
+        if block.end_level in obs_by_level:
+            regimen_groups.append(current_group)
+            current_group = []
+    
+    # Add any remaining blocks (after the last observation)
+    if current_group:
+        regimen_groups.append(current_group)
+    
+    if verbose:
+        print(f"\nGrouped into {len(regimen_groups)} regimen(s) between observations:")
+        for i, group in enumerate(regimen_groups):
+            start_level = group[0].start_level
+            end_level = group[-1].end_level
+            print(f"  Regimen {i+1}: levels {start_level}-{end_level} ({len(group)} block(s))")
+    
+    # 7. Iterate over regimen groups
     current_iv_pmf = iv_prior
     current_ev_pmf = ev_prior
     
     # Counter for ordering debug plots
     plot_counter = 0
     
-    for block_idx, block in enumerate(split_regimen.blocks):
+    for regimen_idx, blocks_group in enumerate(regimen_groups):
+        # Get the start and end levels for this regimen group
+        regimen_start_level = blocks_group[0].start_level
+        regimen_end_level = blocks_group[-1].end_level
+        
         if verbose:
             print(f"\n{'='*70}")
-            print(f"Processing block {block_idx+1}/{len(split_regimen.blocks)}: "
-                  f"levels {block.start_level}-{block.end_level} at {block.location}")
+            print(f"Processing regimen {regimen_idx+1}/{len(regimen_groups)}: "
+                  f"levels {regimen_start_level}-{regimen_end_level}")
+            print(f"  Contains {len(blocks_group)} block(s)")
             print(f"{'='*70}")
         
-        # Create a single-block regimen for the simulator
-        block_regimen = TrainingRegimen(blocks=[block])
+        # Create a regimen with all blocks in this group
+        group_regimen = TrainingRegimen(blocks=blocks_group)
         
-        # Run RegimenSimulator over this block
+        # Run RegimenSimulator over the entire regimen group (cumulative)
         simulator = RegimenSimulator(
-            regimen=block_regimen,
+            regimen=group_regimen,
             species=species_info,
             gen=gen,
         )
         
-        # Run simulation to get EV samples
+        # Run simulation to get EV samples for the entire regimen
         num_trials = M
-        simulator.run_simulation(num_trials=num_trials, exp_start=species_info.exp_to_level(block.start_level))
+        simulator.run_simulation(num_trials=num_trials, exp_start=species_info.exp_to_level(regimen_start_level))
         
         # Convert samples to EV_PMF
         post_ev_sim = simulator.toPMF(allocator="round")
@@ -482,7 +510,7 @@ def track_training_stats(
             plot_marginals(
                 post_ev_sim,
                 current_iv_pmf,
-                title=f"EV Gains from Simulation Block {block_idx+1} Levels {block.start_level}-{block.end_level}",
+                title=f"EV Gains from Simulation Regimen {regimen_idx+1} Levels {regimen_start_level}-{regimen_end_level}",
                 output_dir="plots/simulated_ev",
                 counter=plot_counter,
                 plot_ev=True,
@@ -499,7 +527,7 @@ def track_training_stats(
             plot_marginals(
                 current_ev_pmf,
                 current_iv_pmf,
-                title=f"Updated EV PMF Block {block_idx+1} Levels {block.start_level}-{block.end_level}",
+                title=f"Updated EV PMF Regimen {regimen_idx+1} Levels {regimen_start_level}-{regimen_end_level}",
                 output_dir="plots/updated_pmf",
                 counter=plot_counter,
                 plot_ev=True,
@@ -507,23 +535,23 @@ def track_training_stats(
             )
             plot_counter += 1
         
-        # IV doesn't change during simulation (no observations yet in this block)
+        # IV doesn't change during simulation (no observations yet)
         # Keep current_iv_pmf as is
         
         if verbose:
-            print(f"\nCompleted simulation for block (levels {block.start_level}-{block.end_level})")
+            print(f"\nCompleted simulation for regimen (levels {regimen_start_level}-{regimen_end_level})")
         
-        # Check if there are observations at the end of this block
-        if block.end_level in obs_by_level:
-            obs_list = obs_by_level[block.end_level]
+        # Check if there are observations at the end of this regimen
+        if regimen_end_level in obs_by_level:
+            obs_list = obs_by_level[regimen_end_level]
             
             if verbose:
-                print(f"\nFound {len(obs_list)} observation(s) at level {block.end_level}")
+                print(f"\nFound {len(obs_list)} observation(s) at level {regimen_end_level}")
             
             # Process each observation at this level
             for obs_idx, obs in enumerate(obs_list):
                 if verbose:
-                    print(f"\n  Applying observation {obs_idx+1}/{len(obs_list)} at level {block.end_level}")
+                    print(f"\n  Applying observation {obs_idx+1}/{len(obs_list)} at level {regimen_end_level}")
                     print(f"  Observed stats: {obs.stats}")
                 
                 # Apply analytic update
@@ -539,14 +567,14 @@ def track_training_stats(
                 )
                 
                 if verbose:
-                    print(f"  Completed Bayesian update for observation at level {block.end_level}")
+                    print(f"  Completed Bayesian update for observation at level {regimen_end_level}")
                 
                 # Optional: plot both IV and EV after observation (both change now)
                 if debug_plots:
                     plot_marginals(
                         current_ev_pmf,
                         current_iv_pmf,
-                        title=f"After Observation Level {block.end_level} Obs {obs_idx+1}",
+                        title=f"After Observation Level {regimen_end_level} Obs {obs_idx+1}",
                         output_dir="plots/observation_update",
                         counter=plot_counter,
                         plot_ev=True,
