@@ -372,7 +372,7 @@ def analytic_update_with_observation(
     M: int = 20000,
     verbose: bool = False,
     batch_size: int | None = None,
-    max_batches: int = 10,
+    max_batches: int = 1000,
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
     One-shot update using IV-only sampling + analytic EV feasibility,
@@ -428,10 +428,14 @@ def analytic_update_with_observation(
 
     # ----- 1) feasibility mask: (6, 32, max_ev+1) -----
     feasible_ev_mask = np.zeros((6, 32, max_ev + 1), dtype=bool)
-    feasible_iv_mask = np.ones((6, 32), dtype=bool)
+    feasible_iv_mask = prior_iv.P > 0.0  # (6, 32)
+    
     for s in range(6):
         is_hp = (s == 0)
         for iv_val in range(32):
+            if not feasible_iv_mask[s, iv_val]:
+                feasible_ev_mask[s, iv_val, :] = False
+                continue
             mask = feasible_ev_mask_for_stat(
                 y=int(obs[s]),
                 B=int(Bvec[s]),
