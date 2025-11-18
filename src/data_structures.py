@@ -18,6 +18,17 @@ class StatType(Enum):
     SPEED = 5
 
 
+# Mapping from StatType to StatBlock attribute names
+_STAT_ATTR = {
+    StatType.HP: "hp",
+    StatType.ATTACK: "atk",
+    StatType.DEFENSE: "def_",
+    StatType.SPECIAL_ATTACK: "spa",
+    StatType.SPECIAL_DEFENSE: "spd",
+    StatType.SPEED: "spe",
+}
+
+
 @dataclass
 class StatBlock:
     """
@@ -34,14 +45,12 @@ class StatBlock:
     def __getitem__(self, key: StatType) -> int:
         if not isinstance(key, StatType):
             raise TypeError("StatBlock indices must be StatType")
-        attr = key.name.lower()
-        return getattr(self, attr)
+        return getattr(self, _STAT_ATTR[key])
 
     def __setitem__(self, key: StatType, value: int) -> None:
         if not isinstance(key, StatType):
             raise TypeError("StatBlock indices must be StatType")
-        attr = key.name.lower()
-        setattr(self, attr, value)
+        setattr(self, _STAT_ATTR[key], value)
 
     def __add__(self, other: "StatBlock") -> "StatBlock":
         return StatBlock(
@@ -90,6 +99,26 @@ class StatBlock:
     @classmethod
     def zeros(cls) -> "StatBlock":
         return cls()
+
+
+def statblock_to_array(sb: StatBlock) -> "np.ndarray":
+    """Convert a StatBlock to a numpy array [hp, atk, def_, spa, spd, spe]."""
+    import numpy as np
+    return np.array([sb.hp, sb.atk, sb.def_, sb.spa, sb.spd, sb.spe], dtype=int)
+
+
+def array_to_statblock(arr: "np.ndarray") -> StatBlock:
+    """Convert a numpy array [hp, atk, def_, spa, spd, spe] to a StatBlock."""
+    import numpy as np
+    arr = np.asarray(arr, dtype=int)
+    return StatBlock(
+        hp=int(arr[0]),
+        atk=int(arr[1]),
+        def_=int(arr[2]),
+        spa=int(arr[3]),
+        spd=int(arr[4]),
+        spe=int(arr[5]),
+    )
 
 
 # =====================

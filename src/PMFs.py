@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 import numpy as np
+from numpy.typing import NDArray
+from numpy import ndarray
 from typing import Optional, Tuple, Dict, Any, List
 
 from data_structures import *  # StatBlock, etc.
@@ -75,22 +77,39 @@ class IV_PMF:
             idx[s] = np.searchsorted(cdf[s], u[s], side="right")
         return np.clip(idx, 0, 31)
 
-    def getProb(self, IV : ndarray) -> ndarray:
+    def getProb(self, IV: np.ndarray) -> np.ndarray:
         """
-        Return P(IV) under this PMF
-        IV: Nx6 array
-        Return: N narray of total probs
+        Return P(IV) under this PMF.
+        
+        Parameters
+        ----------
+        IV : (6,) or (N, 6) array-like of integer IVs in [0..31]
+        
+        Returns
+        -------
+        out : scalar (if IV shape (6,)) or (N,) ndarray of probabilities
         """
-        PoIVs = self.prior[np.arange(6), np.asarray(IV, dtype=int)]
-        return np.prod(PoIVs, axis=0)
+        logP = self.getLogProb(IV)
+        return np.exp(logP)
 
     def getLogProb(self, IV: NDArray[np.integer] | NDArray[np.floating]) -> np.ndarray:
         """
         Return log P(IV) under the row-wise prior.
-        - IV shape: (6,) or (6, M), with entries in 0..31
-        - Output: scalar (if IV is (6,)) or (M,) for a batch.
-        Zeros in the prior produce -inf (no smoothing).
-        Out-of-range IV indices are treated as probability 0 → -inf.
+        
+        Parameters
+        ----------
+        IV : (6,) or (6, M) array-like of integer IVs in [0..31]
+             Shape convention: (6,) for single IV vector, or
+                               (6, M) for M samples (column-oriented batch)
+                               
+        Returns
+        -------
+        out : scalar (if IV is (6,)) or (M,) for a batch.
+        
+        Notes
+        -----
+        - Zeros in the prior produce -inf (no smoothing).
+        - Out-of-range IV indices are treated as probability 0 → -inf.
         """
         idx = np.asarray(IV, dtype=int)
         scalar_input = idx.ndim == 1
@@ -145,7 +164,8 @@ class IV_PMF:
 
         Parameters
         ----------
-        samples : (N,6) integer IVs in [0..31]
+        samples : (N, 6) array-like of integer IVs in [0..31]
+                  Shape convention: N samples × 6 stats (row-oriented)
         weights : optional (N,) nonnegative weights; if None, uniform
         rng      : optional RNG to attach to the IV_PMF
         return_hist : if True, also return {'counts': (6,32), 'weights': (N,)}
@@ -498,7 +518,8 @@ class EV_PMF:
 
         Parameters
         ----------
-        samples : (N,6) integer EVs or list[StatBlock]
+        samples : (N, 6) array-like of integer EVs or list[StatBlock]
+                  Shape convention: N samples × 6 stats (row-oriented)
         w_bins  : number of bins for each of the 5 stick-breaking rows
         return_coords : also return {'totals','W6','S5'} if True
         rng, allocator : forwarded to EV_PMF constructor

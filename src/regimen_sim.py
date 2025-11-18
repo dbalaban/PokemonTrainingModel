@@ -10,17 +10,18 @@ from matplotlib import pyplot as plt
 
 
 class RegimenSimulator:
-    def __init__(self, regimen: TrainingRegimen, species: SpeciesInfo, gen: int):
+    def __init__(self, regimen: TrainingRegimen, species: SpeciesInfo, gen: int, rng: np.random.Generator | None = None):
         self.regimen = regimen
         self.species = species
         self.gen = gen
+        self.rng = rng if rng is not None else np.random.default_rng()
         self.samples: List[StatBlock] = []
 
     def randomEncounter(self, encounters: List[EncounterOption]) -> Encounter:
         rates = np.array([enc.weight for enc in encounters], dtype=float)
         rates /= rates.sum()
-        option_choice = np.random.choice(len(encounters), p=rates)
-        level_choice = np.random.choice(encounters[option_choice].levels)
+        option_choice = self.rng.choice(len(encounters), p=rates)
+        level_choice = self.rng.choice(encounters[option_choice].levels)
         return Encounter(target=encounters[option_choice].target, level=level_choice)
 
     # Simulate a single training block, returning resulting exp and EV gains.
@@ -36,6 +37,8 @@ class RegimenSimulator:
             ev_gain = encounter.target.ev_yield
             exp += exp_gain
             ev_gains += ev_gain
+        # Clamp exp to exact threshold to prevent level overshoot
+        exp = min(exp, end_exp)
         return exp, ev_gains
 
     def simulate_trial(self, exp_start: int = 0) -> StatBlock:
