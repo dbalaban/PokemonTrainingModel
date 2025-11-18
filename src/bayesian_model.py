@@ -22,8 +22,7 @@ def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
     """
     Update EV PMF:
       - T: discrete convolution (totals add)
-      - W: barycenter of the five independent stick-breaking row pmfs,
-           weighted solely by E[T] from prior and update.
+      - alpha: weighted combination of Dirichlet concentration parameters
     mode: "linear" or "geometric"
     """
     # ---- 1) Update T via convolution ----
@@ -36,7 +35,7 @@ def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
     # Renormalize after truncation to account for dropped overflow mass
     new_T = new_T / s if s > 0 else prior.T.copy()
 
-    # ---- 2) Update W using only expected totals as masses ----
+    # ---- 2) Update alpha using expected totals as masses ----
     tvals_prior = np.arange(prior.max_total_ev + 1, dtype=float)
     tvals_upd   = np.arange(upd.max_total_ev   + 1, dtype=float)
     m_prior = float((tvals_prior * prior.T).sum())
@@ -44,22 +43,18 @@ def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
     denom = m_prior + m_upd
 
     if denom <= 0:
-        new_W = prior.W.copy()
+        new_alpha = prior.alpha.copy()
     else:
         if mode == "linear":
-            new_W = (m_prior * prior.W + m_upd * upd.W) / denom
-            row_sums = new_W.sum(axis=1, keepdims=True)
-            new_W = np.divide(new_W, row_sums, out=new_W, where=(row_sums > 0))
+            new_alpha = (m_prior * prior.alpha + m_upd * upd.alpha) / denom
         elif mode == "geometric":
-            eps = 1e-12
-            logW = m_prior * np.log(prior.W + eps) + m_upd * np.log(upd.W + eps)
-            new_W = np.exp(logW)
-            row_sums = new_W.sum(axis=1, keepdims=True)
-            new_W = np.divide(new_W, row_sums, out=new_W, where=(row_sums > 0))
+            # Geometric mean in log space
+            log_alpha = m_prior * np.log(prior.alpha) + m_upd * np.log(upd.alpha)
+            new_alpha = np.exp(log_alpha / denom)
         else:
             raise ValueError("mode must be 'linear' or 'geometric'")
 
-    return EV_PMF(priorT=new_T, priorW=new_W, w_bins=prior.w_bins)
+    return EV_PMF(priorT=new_T, alpha=new_alpha)
 
 # Use centralized helper for StatBlock ↔ array conversion
 _sb_to_arr = statblock_to_array
@@ -212,12 +207,11 @@ def hybrid_ev_iv_update(
         if np.all(tv < iv_tv_tol):
             break
 
-        # ----- (2) EV update via importance sampling (stick-breaking only) -----
+        # ----- (2) EV update via importance sampling (Dirichlet-Multinomial) -----
         M = mc_particles
 
-        # Sample S5 and W6 from current EV posterior
-        S5 = ev_post._sample_S5(M)                         # (5, M)
-        W6 = EV_PMF._stick_breaking_from_unit(S5)          # (6, M)
+        # Sample proportions W6 from current EV posterior (Dirichlet)
+        W6 = ev_post._sample_proportions(M)                # (6, M)
 
         # Sample totals T
         t_cdf = np.cumsum(ev_post.T)
@@ -564,13 +558,12 @@ def update_with_observation(
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
     One-shot importance update with proposal q(EV,IV) = prior_ev × prior_iv.
-    Uses stick-breaking sampling only (no corners).
+    Uses Dirichlet-Multinomial sampling.
     """
     obs = _sb_to_arr(obs_stats)
 
-    # ----- sample EV from prior_ev via stick-breaking -----
-    S5 = prior_ev._sample_S5(M)                         # (5, M)
-    W6 = EV_PMF._stick_breaking_from_unit(S5)           # (6, M)
+    # ----- sample EV from prior_ev via Dirichlet-Multinomial -----
+    W6 = prior_ev._sample_proportions(M)                # (6, M)
 
     # sample totals from T
     t_cdf = np.cumsum(prior_ev.T)                       # length 511
