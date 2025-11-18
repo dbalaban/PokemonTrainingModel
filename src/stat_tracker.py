@@ -188,13 +188,15 @@ def plot_marginals(
     title: str = "IV/EV Marginals",
     output_dir: str = "plots",
     counter: int = 0,
+    plot_ev: bool = True,
+    plot_iv: bool = True,
 ) -> None:
     """
     Plot IV and EV marginal distributions on single plots with color-coded lines.
     
     This function creates two separate plots:
-    - One for IV distributions (all stats on one plot with legend)
-    - One for EV distributions (all stats on one plot with legend)
+    - One for IV distributions (all stats on one plot with legend) - if plot_iv is True
+    - One for EV distributions (all stats on one plot with legend) - if plot_ev is True
     
     Stats where P(x=0)=1 are not plotted (assumed to be always 0).
     
@@ -210,6 +212,10 @@ def plot_marginals(
         Directory to save the plots (default: "plots")
     counter : int
         Counter for ordering the plots in file names (default: 0)
+    plot_ev : bool
+        Whether to plot EV distributions (default: True)
+    plot_iv : bool
+        Whether to plot IV distributions (default: True)
     """
     try:
         import matplotlib.pyplot as plt
@@ -225,94 +231,96 @@ def plot_marginals(
         safe_title = title.replace(' ', '_').replace('/', '_').lower()
         
         # ==================== Plot IV marginals ====================
-        fig_iv, ax_iv = plt.subplots(figsize=(10, 6))
-        iv_values = np.arange(32)
-        
-        # Track which stats to plot
-        plotted_any_iv = False
-        
-        for s_idx in range(6):
-            marginal = iv_pmf.P[s_idx]
+        if plot_iv:
+            fig_iv, ax_iv = plt.subplots(figsize=(10, 6))
+            iv_values = np.arange(32)
             
-            # Check if P(x=0) = 1, which means stat is always 0
-            if marginal[0] > 0.9999:
-                # Skip plotting this stat
-                continue
+            # Track which stats to plot
+            plotted_any_iv = False
             
-            # Plot this stat
-            ax_iv.plot(iv_values, marginal, label=stat_names[s_idx], 
-                      color=colors[s_idx], linewidth=2, marker='o', markersize=3)
-            plotted_any_iv = True
-        
-        # Configure IV plot
-        ax_iv.set_xlim(0, 31)
-        ax_iv.set_ylim(0, 1)
-        ax_iv.set_xlabel('IV Value', fontsize=12)
-        ax_iv.set_ylabel('Probability', fontsize=12)
-        ax_iv.set_title(f'IV Distributions - {title}', fontsize=14)
-        ax_iv.grid(True, alpha=0.3)
-        
-        if plotted_any_iv:
-            ax_iv.legend(loc='best', fontsize=10)
-        
-        # Save IV plot
-        iv_filename = os.path.join(output_dir, f"{counter:03d}_iv_{safe_title}.png")
-        plt.tight_layout()
-        fig_iv.savefig(iv_filename, dpi=100)
-        print(f"IV plot saved to: {iv_filename}")
-        plt.close(fig_iv)
+            for s_idx in range(6):
+                marginal = iv_pmf.P[s_idx]
+                
+                # Check if P(x=0) = 1, which means stat is always 0
+                if marginal[0] > 0.9999:
+                    # Skip plotting this stat
+                    continue
+                
+                # Plot this stat
+                ax_iv.plot(iv_values, marginal, label=stat_names[s_idx], 
+                          color=colors[s_idx], linewidth=2, marker='o', markersize=3)
+                plotted_any_iv = True
+            
+            # Configure IV plot
+            ax_iv.set_xlim(0, 31)
+            ax_iv.set_ylim(0, 1)
+            ax_iv.set_xlabel('IV Value', fontsize=12)
+            ax_iv.set_ylabel('Probability', fontsize=12)
+            ax_iv.set_title(f'IV Distributions - {title}', fontsize=14)
+            ax_iv.grid(True, alpha=0.3)
+            
+            if plotted_any_iv:
+                ax_iv.legend(loc='best', fontsize=10)
+            
+            # Save IV plot
+            iv_filename = os.path.join(output_dir, f"{counter:03d}_iv_{safe_title}.png")
+            plt.tight_layout()
+            fig_iv.savefig(iv_filename, dpi=100)
+            print(f"IV plot saved to: {iv_filename}")
+            plt.close(fig_iv)
         
         # ==================== Plot EV marginals ====================
-        fig_ev, ax_ev = plt.subplots(figsize=(10, 6))
-        
-        # Get EV marginals
-        ev_marginals = ev_pmf.getMarginals(mc_samples=5000)
-        
-        # Determine max EV value (252 per stat)
-        max_ev_value = 252
-        ev_values = np.arange(max_ev_value + 1)
-        
-        # Track which stats to plot
-        plotted_any_ev = False
-        
-        for s_idx in range(6):
-            marginal = ev_marginals[s_idx]
+        if plot_ev:
+            fig_ev, ax_ev = plt.subplots(figsize=(10, 6))
             
-            # Check if P(x=0) = 1, which means stat is always 0
-            if len(marginal) > 0 and marginal[0] > 0.9999:
-                # Skip plotting this stat
-                continue
+            # Get EV marginals
+            ev_marginals = ev_pmf.getMarginals(mc_samples=5000)
             
-            # Pad marginal if needed
-            if len(marginal) <= max_ev_value:
-                padded_marginal = np.zeros(max_ev_value + 1)
-                padded_marginal[:len(marginal)] = marginal
-            else:
-                padded_marginal = marginal[:max_ev_value + 1]
+            # Determine max EV value (252 per stat)
+            max_ev_value = 252
+            ev_values = np.arange(max_ev_value + 1)
             
-            # Plot this stat
-            ax_ev.plot(ev_values, padded_marginal, label=stat_names[s_idx], 
-                      color=colors[s_idx], linewidth=2, marker='o', markersize=2, 
-                      markevery=max(1, max_ev_value // 20))
-            plotted_any_ev = True
-        
-        # Configure EV plot
-        ax_ev.set_xlim(0, max_ev_value)
-        ax_ev.set_ylim(0, 1)
-        ax_ev.set_xlabel('EV Value', fontsize=12)
-        ax_ev.set_ylabel('Probability', fontsize=12)
-        ax_ev.set_title(f'EV Distributions - {title}', fontsize=14)
-        ax_ev.grid(True, alpha=0.3)
-        
-        if plotted_any_ev:
-            ax_ev.legend(loc='best', fontsize=10)
-        
-        # Save EV plot
-        ev_filename = os.path.join(output_dir, f"{counter:03d}_ev_{safe_title}.png")
-        plt.tight_layout()
-        fig_ev.savefig(ev_filename, dpi=100)
-        print(f"EV plot saved to: {ev_filename}")
-        plt.close(fig_ev)
+            # Track which stats to plot
+            plotted_any_ev = False
+            
+            for s_idx in range(6):
+                marginal = ev_marginals[s_idx]
+                
+                # Check if P(x=0) = 1, which means stat is always 0
+                if len(marginal) > 0 and marginal[0] > 0.9999:
+                    # Skip plotting this stat
+                    continue
+                
+                # Pad marginal if needed
+                if len(marginal) <= max_ev_value:
+                    padded_marginal = np.zeros(max_ev_value + 1)
+                    padded_marginal[:len(marginal)] = marginal
+                else:
+                    padded_marginal = marginal[:max_ev_value + 1]
+                
+                # Plot this stat
+                ax_ev.plot(ev_values, padded_marginal, label=stat_names[s_idx], 
+                          color=colors[s_idx], linewidth=2, marker='o', markersize=2, 
+                          markevery=max(1, max_ev_value // 20))
+                plotted_any_ev = True
+            
+            # Configure EV plot
+            ax_ev.set_xlim(0, max_ev_value)
+            ax_ev.set_ylim(0, 1)
+            ax_ev.set_xlabel('EV Value', fontsize=12)
+            ax_ev.set_ylabel('Probability', fontsize=12)
+            ax_ev.set_title(f'EV Distributions - {title}', fontsize=14)
+            ax_ev.grid(True, alpha=0.3)
+            
+            if plotted_any_ev:
+                ax_ev.legend(loc='best', fontsize=10)
+            
+            # Save EV plot
+            ev_filename = os.path.join(output_dir, f"{counter:03d}_ev_{safe_title}.png")
+            plt.tight_layout()
+            fig_ev.savefig(ev_filename, dpi=100)
+            print(f"EV plot saved to: {ev_filename}")
+            plt.close(fig_ev)
         
     except Exception as e:
         # Fail gracefully if matplotlib is not available or other errors occur
@@ -438,45 +446,75 @@ def track_training_stats(
             obs_by_level[obs.level] = []
         obs_by_level[obs.level].append(obs)
     
-    # 6. Iterate over blocks
+    # 6. Group blocks into regimens between observations
+    # Each regimen runs from start (or previous observation) to next observation
+    regimen_groups = []
+    current_group = []
+    
+    for block in split_regimen.blocks:
+        current_group.append(block)
+        # If this block ends at an observation level, close the group
+        if block.end_level in obs_by_level:
+            regimen_groups.append(current_group)
+            current_group = []
+    
+    # Add any remaining blocks (after the last observation)
+    if current_group:
+        regimen_groups.append(current_group)
+    
+    if verbose:
+        print(f"\nGrouped into {len(regimen_groups)} regimen(s) between observations:")
+        for i, group in enumerate(regimen_groups):
+            start_level = group[0].start_level
+            end_level = group[-1].end_level
+            print(f"  Regimen {i+1}: levels {start_level}-{end_level} ({len(group)} block(s))")
+    
+    # 7. Iterate over regimen groups
     current_iv_pmf = iv_prior
     current_ev_pmf = ev_prior
     
     # Counter for ordering debug plots
     plot_counter = 0
     
-    for block_idx, block in enumerate(split_regimen.blocks):
+    for regimen_idx, blocks_group in enumerate(regimen_groups):
+        # Get the start and end levels for this regimen group
+        regimen_start_level = blocks_group[0].start_level
+        regimen_end_level = blocks_group[-1].end_level
+        
         if verbose:
             print(f"\n{'='*70}")
-            print(f"Processing block {block_idx+1}/{len(split_regimen.blocks)}: "
-                  f"levels {block.start_level}-{block.end_level} at {block.location}")
+            print(f"Processing regimen {regimen_idx+1}/{len(regimen_groups)}: "
+                  f"levels {regimen_start_level}-{regimen_end_level}")
+            print(f"  Contains {len(blocks_group)} block(s)")
             print(f"{'='*70}")
         
-        # Create a single-block regimen for the simulator
-        block_regimen = TrainingRegimen(blocks=[block])
+        # Create a regimen with all blocks in this group
+        group_regimen = TrainingRegimen(blocks=blocks_group)
         
-        # Run RegimenSimulator over this block
+        # Run RegimenSimulator over the entire regimen group (cumulative)
         simulator = RegimenSimulator(
-            regimen=block_regimen,
+            regimen=group_regimen,
             species=species_info,
             gen=gen,
         )
         
-        # Run simulation to get EV samples
+        # Run simulation to get EV samples for the entire regimen
         num_trials = M
-        simulator.run_simulation(num_trials=num_trials, exp_start=species_info.exp_to_level(block.start_level))
+        simulator.run_simulation(num_trials=num_trials, exp_start=species_info.exp_to_level(regimen_start_level))
         
         # Convert samples to EV_PMF
         post_ev_sim = simulator.toPMF(allocator="round")
         
-        # Optional: plot after simulated EV additions (before combining with prior)
+        # Optional: plot EV gains from simulation (EV only, no IV change yet)
         if debug_plots:
             plot_marginals(
                 post_ev_sim,
                 current_iv_pmf,
-                title=f"Simulated EV Block {block_idx+1} Levels {block.start_level}-{block.end_level}",
+                title=f"EV Gains from Simulation Regimen {regimen_idx+1} Levels {regimen_start_level}-{regimen_end_level}",
                 output_dir="plots/simulated_ev",
                 counter=plot_counter,
+                plot_ev=True,
+                plot_iv=False,  # IV doesn't change during simulation
             )
             plot_counter += 1
         
@@ -484,34 +522,36 @@ def track_training_stats(
         from bayesian_model import update_ev_pmf
         current_ev_pmf = update_ev_pmf(current_ev_pmf, post_ev_sim, mode="linear")
         
-        # Optional: plot updated PMF from simulator
+        # Optional: plot updated EV PMF after combining with prior (EV only, IV still unchanged)
         if debug_plots:
             plot_marginals(
                 current_ev_pmf,
                 current_iv_pmf,
-                title=f"Updated PMF Block {block_idx+1} Levels {block.start_level}-{block.end_level}",
+                title=f"Updated EV PMF Regimen {regimen_idx+1} Levels {regimen_start_level}-{regimen_end_level}",
                 output_dir="plots/updated_pmf",
                 counter=plot_counter,
+                plot_ev=True,
+                plot_iv=False,  # IV still doesn't change until observation
             )
             plot_counter += 1
         
-        # IV doesn't change during simulation (no observations yet in this block)
+        # IV doesn't change during simulation (no observations yet)
         # Keep current_iv_pmf as is
         
         if verbose:
-            print(f"\nCompleted simulation for block (levels {block.start_level}-{block.end_level})")
+            print(f"\nCompleted simulation for regimen (levels {regimen_start_level}-{regimen_end_level})")
         
-        # Check if there are observations at the end of this block
-        if block.end_level in obs_by_level:
-            obs_list = obs_by_level[block.end_level]
+        # Check if there are observations at the end of this regimen
+        if regimen_end_level in obs_by_level:
+            obs_list = obs_by_level[regimen_end_level]
             
             if verbose:
-                print(f"\nFound {len(obs_list)} observation(s) at level {block.end_level}")
+                print(f"\nFound {len(obs_list)} observation(s) at level {regimen_end_level}")
             
             # Process each observation at this level
             for obs_idx, obs in enumerate(obs_list):
                 if verbose:
-                    print(f"\n  Applying observation {obs_idx+1}/{len(obs_list)} at level {block.end_level}")
+                    print(f"\n  Applying observation {obs_idx+1}/{len(obs_list)} at level {regimen_end_level}")
                     print(f"  Observed stats: {obs.stats}")
                 
                 # Apply analytic update
@@ -527,16 +567,18 @@ def track_training_stats(
                 )
                 
                 if verbose:
-                    print(f"  Completed Bayesian update for observation at level {block.end_level}")
+                    print(f"  Completed Bayesian update for observation at level {regimen_end_level}")
                 
-                # Optional: plot after each observation
+                # Optional: plot both IV and EV after observation (both change now)
                 if debug_plots:
                     plot_marginals(
                         current_ev_pmf,
                         current_iv_pmf,
-                        title=f"Observation Update Level {block.end_level} Obs {obs_idx+1}",
+                        title=f"After Observation Level {regimen_end_level} Obs {obs_idx+1}",
                         output_dir="plots/observation_update",
                         counter=plot_counter,
+                        plot_ev=True,
+                        plot_iv=True,  # Both IV and EV updated by observation
                     )
                     plot_counter += 1
     
@@ -544,7 +586,7 @@ def track_training_stats(
     print_iv_histograms(current_iv_pmf, title="Final IV Marginal Distributions")
     print_ev_histograms(current_ev_pmf, title="Final EV Marginal Distributions")
     
-    # 8. Optional: final debug plot
+    # 8. Optional: final debug plot (both IV and EV)
     if debug_plots:
         plot_marginals(
             current_ev_pmf,
@@ -552,6 +594,8 @@ def track_training_stats(
             title="Final Posteriors",
             output_dir="plots",
             counter=plot_counter,
+            plot_ev=True,
+            plot_iv=True,
         )
     
     return current_ev_pmf, current_iv_pmf
