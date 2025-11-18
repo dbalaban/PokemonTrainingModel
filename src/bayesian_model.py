@@ -244,22 +244,13 @@ def hybrid_ev_iv_update(
         # Update IV posterior
         iv_post.weighted_add_(IV_mat, w)
 
-        # Rebuild EV posterior (T and W) using weighted particles
+        # Rebuild EV posterior (T and alpha) using weighted particles
         totals = EV_mat.sum(axis=0).clip(0, ev_post.max_total_ev).astype(int)
         new_T = np.bincount(totals, weights=w, minlength=ev_post.max_total_ev + 1)
         new_T = (new_T / new_T.sum()) if new_T.sum() > 0 else ev_post.T.copy()
 
-        # Use sampled S5 to update W (fast + consistent with proposal)
-        BINS = ev_post.w_bins
-        idx = np.rint(S5 * (BINS - 1)).astype(int).clip(0, BINS - 1)  # (5, M)
-        new_W = np.zeros_like(ev_post.W, dtype=float)
-        for r in range(5):  # fixed small loop
-            new_W[r] = np.bincount(idx[r], weights=w, minlength=BINS)
-
-        row_sums = new_W.sum(axis=1, keepdims=True)
-        new_W = np.divide(new_W, row_sums, out=np.zeros_like(new_W), where=(row_sums > 0))
-
-        ev_post = EV_PMF(priorT=new_T, priorW=new_W, w_bins=BINS)
+        # Estimate new alpha from weighted proportions using from_samples
+        ev_post = EV_PMF.from_samples(EV_mat.T, weights=w)
 
     return ev_post, iv_post
 
@@ -596,17 +587,8 @@ def update_with_observation(
     new_iv = IV_PMF(prior=prior_iv.P, rng=prior_ev.rng)
     new_iv.weighted_add_(IV_mat, w)
 
-    # ----- EV posterior (T and W) -----
-    totals = EV_mat.sum(axis=0).clip(0, prior_ev.max_total_ev).astype(int)
-    new_T = np.bincount(totals, weights=w, minlength=prior_ev.max_total_ev + 1)
-    new_T = (new_T / new_T.sum()) if new_T.sum() > 0 else prior_ev.T.copy()
+    # ----- EV posterior (T and alpha) -----
+    # Use from_samples to estimate alpha from weighted particles
+    ev_post = EV_PMF.from_samples(EV_mat.T, weights=w, rng=prior_ev.rng)
 
-    B = prior_ev.w_bins
-    new_W = np.zeros_like(prior_ev.W, dtype=float)
-    idx = np.rint(S5 * (B - 1)).astype(int).clip(0, B - 1)  # (5, M)
-    for r in range(5):
-        np.add.at(new_W[r], idx[r], w)
-    row_sums = new_W.sum(axis=1, keepdims=True)
-    new_W = np.divide(new_W, row_sums, out=np.zeros_like(new_W), where=(row_sums > 0))
-
-    return EV_PMF(priorT=new_T, priorW=new_W, w_bins=B), new_iv
+    return ev_post, new_iv
