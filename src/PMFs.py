@@ -544,6 +544,8 @@ class EV_PMF:
         rng: np.random.Generator | None = None,
         allocator: str = "round",
         weights: "np.ndarray | list[float] | None" = None,
+        smooth_W: bool = False,
+        smooth_eps: float = 1e-8,
     ) -> "EV_PMF | tuple[EV_PMF, dict[str, np.ndarray]]":
         """
         Build an EV_PMF from EV samples, optionally weighted.
@@ -555,6 +557,8 @@ class EV_PMF:
         return_coords : also return {'totals','W6','S5'} if True
         rng, allocator : forwarded to EV_PMF constructor
         weights : optional (N,) nonnegative weights; if None, uniform
+        smooth_W : if True, add small epsilon to W rows before normalization (default: False)
+        smooth_eps : epsilon value for smoothing (default: 1e-8)
 
         Returns
         -------
@@ -615,6 +619,10 @@ class EV_PMF:
         W_counts = np.zeros((5, B), dtype=float)
         for r in range(5):
             W_counts[r] = np.bincount(idx[:, r], weights=w, minlength=B)
+
+        # Apply optional smoothing to W before normalization
+        if smooth_W:
+            W_counts += smooth_eps
 
         row_sums = W_counts.sum(axis=1, keepdims=True)
         W_hist = np.divide(W_counts, row_sums, out=np.zeros_like(W_counts), where=(row_sums > 0))
