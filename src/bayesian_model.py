@@ -271,6 +271,112 @@ def hybrid_ev_iv_update(
 
 # --------------------------- Analytic IS Update ------------------------------------------
 
+def analytic_update_sample_batch(
+    prior_ev: EV_PMF,
+    prior_iv_full: IV_PMF,
+    prior_iv_trunc: IV_PMF,
+    feasible_ev_mask: np.ndarray,
+    max_ev: int,
+    max_total: int,
+    batch_M: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Sample a batch of (IV, EV) pairs and compute unnormalized log weights.
+
+    Parameters
+    ----------
+    prior_ev : EV_PMF
+        EV prior (T, W) used in the target density.
+    prior_iv_full : IV_PMF
+        Original IV prior P_prior_IV (target).
+    prior_iv_trunc : IV_PMF
+        Truncated IV proposal q_IV (per-stat, infeasible IVs zeroed and renormalized).
+    feasible_ev_mask : np.ndarray
+        Boolean array of shape (6, 32, max_ev+1) saying which EVs are feasible
+        for each (stat s, IV value).
+    max_ev : int
+        Maximum EV per stat (e.g., 252).
+    max_total : int
+        Maximum total EV (e.g., 510).
+    batch_M : int
+        Number of particles to draw in this batch.
+    rng : np.random.Generator
+        RNG used for sampling.
+
+    Returns
+    -------
+    IV_mat : np.ndarray
+        Shape (6, batch_M), sampled IVs.
+    EV_mat : np.ndarray
+        Shape (6, batch_M), sampled EVs.
+    logw : np.ndarray
+        Shape (batch_M,), unnormalized log importance weights.
+    col_valid : np.ndarray
+        Shape (batch_M,), boolean mask of feasible columns.
+    """
+    # Sample IV from q_IV (truncated prior)
+    IV_mat = prior_iv_trunc.sample(batch_M)  # (6, M)
+
+    # Gather EV feasibility masks for these IVs ⇒ (6, M, max_ev+1)
+    EV_mask_mat = np.empty((6, batch_M, max_ev + 1), dtype=bool)
+    for s in range(6):
+        EV_mask_mat[s] = feasible_ev_mask[s].take(IV_mat[s], axis=0)
+
+    # Count feasible EVs per (s, m)
+    counts = EV_mask_mat.sum(axis=2)         # (6, M)
+    valid_sm = counts > 0                    # (6, M)
+
+    # Draw uniform indices within True-positions, vectorized
+    # (same trick you already had)
+    u = rng.random((6, batch_M))
+    safe_counts = np.maximum(counts, 1)  # avoid zeros in multiplication
+    k = np.minimum(
+        (u * safe_counts).astype(int),
+        np.maximum(counts - 1, 0)
+    )
+
+    cum = np.cumsum(EV_mask_mat, axis=2)                 # (6, M, max_ev+1)
+    choice_idx = (cum > k[..., None]).argmax(axis=2)     # (6, M)
+    choice_idx = np.where(valid_sm, choice_idx, -1)      # -1 means "no feasible EV"
+
+    # Column is invalid if ANY stat has no feasible EV
+    col_valid = (choice_idx >= 0).all(axis=0)            # (M,)
+
+    # Build EV matrix (6, M), ints in [0..max_ev] for valid cols; 0 elsewhere
+    EV_mat = np.where(choice_idx >= 0, choice_idx, 0)
+
+    # Enforce total cap. Mark columns invalid if total > max_total.
+    totals = EV_mat.sum(axis=0)
+    col_valid &= (totals <= max_total)
+
+    # ----- importance weights -----
+    # Target: π(IV,EV) ∝ P_prior_IV(IV) * P_prior_EV(EV) * 1[feasible]
+    # Proposal: q(IV,EV) = q_IV(IV) * q(EV|IV)
+    #
+    # So log w ∝ log P_prior_IV + log P_prior_EV - log q_IV - log q(EV|IV)
+
+    # 1) log P_prior_IV under the *original* prior
+    logP_IV = prior_iv_full.getLogProb(IV_mat)          # (M,)
+    # 2) log q_IV under truncated prior
+    logQ_IV = prior_iv_trunc.getLogProb(IV_mat)         # (M,)
+    # 3) log P_prior_EV
+    logP_E = prior_ev.getProb(EV_mat.T, asLog=True)     # (M,)
+
+    # 4) log q(EV|IV): independent uniform over feasible EVs for each stat.
+    #    For valid columns, counts[s, m] > 0 for all s.
+    #    q(EV|IV) = ∏_s 1 / counts[s,m]
+    #    ⇒ log q(EV|IV) = -∑_s log(counts[s,m])
+    counts_safe = np.where(counts > 0, counts, 1)
+    log_q_E_given_IV = -np.sum(np.log(counts_safe), axis=0)  # (M,)
+
+    logw = logP_IV + logP_E - logQ_IV - log_q_E_given_IV
+
+    # Invalidate infeasible columns
+    logw = np.where(col_valid, logw, -np.inf)
+
+    return IV_mat, EV_mat, logw, col_valid
+
 def analytic_update_with_observation(
     prior_ev: EV_PMF,
     prior_iv: IV_PMF,
@@ -280,21 +386,44 @@ def analytic_update_with_observation(
     nature: Nature,
     M: int = 20000,
     verbose: bool = False,
+    batch_size: int | None = None,
+    max_batches: int = 10,
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
-    One-shot update using IV-only sampling + analytic EV feasibility.
+    One-shot update using IV-only sampling + analytic EV feasibility,
+    with batched importance sampling and proper correction for q(IV,EV).
 
-    Steps
-    -----
-    1) Precompute feasible EV mask for every (stat s, IV in 0..31) that reproduces the observed stat.
-    2) Sample IVs from prior_iv; for each (s, particle), draw EV uniformly from that feasible set.
-    3) Weight each particle by prior mass: log w = log P(IV) + log P(EV) under (T,W) model.
-       (No extra likelihood: feasibility already enforces the observation exactly.)
-    4) Form posteriors for IV (6x32) and EV (T row + 5 independent W histograms) from the weighted particles.
+    Interpretation of M
+    -------------------
+    M is treated as the *target number of valid particles* to use when
+    building the posterior PMFs. We sample in batches (size=batch_size),
+    accumulate valid samples across batches, then normalize weights over
+    all collected valid samples.
 
-    Returns
-    -------
-    (post_ev, post_iv)
+    Proposal q(IV,EV)
+    -----------------
+    - IV is sampled from a *truncated* IV prior q_IV, where any (s,iv)
+      with no feasible EV is given probability 0 and remaining mass is
+      renormalized per stat.
+    - Given IV, each EV_s is sampled *uniformly* over the feasible EVs
+      for that (s, iv_s), independently across stats.
+    - We reject columns that cannot produce the observation (no feasible
+      EV for some stat or total EV > max_total).
+
+    The target density is:
+        π(IV,EV) ∝ P_prior_IV(IV) * P_prior_EV(EV) * 1[feasible(obs, caps)]
+
+    We correct for q(IV,EV) via importance weights:
+
+        log w ∝ log P_prior_IV(IV) + log P_prior_EV(EV)
+                 - log q_IV(IV) - log q(EV|IV)
+
+    where
+        log q_IV(IV)    = sum_s log q_IV_s(IV_s)
+        log q(EV|IV)    = - sum_s log(counts_feasible_EV_s(IV_s))
+
+    and feasibility (including total EV ≤ max_total) is enforced via
+    col_valid (invalid ⇒ w = 0).
     """
     # ----- constants / helpers -----
     obs = _sb_to_arr(obs_stats)  # (6,)
@@ -302,82 +431,121 @@ def analytic_update_with_observation(
     nmult = nature_to_multipliers(nature)
     max_ev = prior_ev.max_ev
     max_total = prior_ev.max_total_ev
+    rng = prior_ev.rng
 
-    # ----- 1) feasibility mask: (6, 32, 253) -----
-    feasible_mask = np.zeros((6, 32, max_ev + 1), dtype=bool)
+    if batch_size is None:
+        batch_size = M  # default: try to get ~M valid from one batch
+
+    # ----- 1) feasibility mask: (6, 32, max_ev+1) -----
+    feasible_ev_mask = np.zeros((6, 32, max_ev + 1), dtype=bool)
+    feasible_iv_mask = np.ones((6, 32), dtype=bool)
     for s in range(6):
         is_hp = (s == 0)
         for iv_val in range(32):
-            feasible_mask[s, iv_val, :] = feasible_ev_mask_for_stat(
-                y=int(obs[s]), B=int(Bvec[s]), L=int(level),
-                n=float(nmult[s]), iv=iv_val, is_hp=is_hp
+            mask = feasible_ev_mask_for_stat(
+                y=int(obs[s]),
+                B=int(Bvec[s]),
+                L=int(level),
+                n=float(nmult[s]),
+                iv=iv_val,
+                is_hp=is_hp,
             )
-
-    # ----- 2) sample IVs and draw EVs uniformly from feasible sets -----
-    # IV_mat: (6, M)
-    IV_mat = prior_iv.sample(M)
-
-    # Gather masks for the sampled IVs ⇒ (6, M, 253)
-    EV_mask_mat = np.empty((6, M, max_ev + 1), dtype=bool)
-    for s in range(6):
-        EV_mask_mat[s] = feasible_mask[s].take(IV_mat[s], axis=0)
-
-    # Count feasible EVs per (s, m)
-    counts = EV_mask_mat.sum(axis=2)                # (6, M)
-    valid_sm = counts > 0                           # (6, M)
-
-    # Draw uniform indices within True-positions, vectorized
-    rng = prior_ev.rng
-    u = rng.random((6, M))
-    k = np.minimum((u * np.maximum(counts, 1)).astype(int), np.maximum(counts - 1, 0))
-
-    cum = np.cumsum(EV_mask_mat, axis=2)           # (6, M, 253)
-    choice_idx = (cum > k[..., None]).argmax(axis=2)  # (6, M); returns 0 if all False
-    # mark infeasible cells explicitly
-    choice_idx = np.where(valid_sm, choice_idx, -1)    # -1 means "no feasible EV"
-
-    # If any (s,m) is infeasible, that particle column can’t produce the obs.
-    # We’ll mark columns invalid if ANY stat is infeasible.
-    col_valid = (choice_idx >= 0).all(axis=0)          # (M,)
-
-    # Build EV matrix (6, M), ints in [0..252] for valid cols; 0 elsewhere
-    EV_mat = np.where(choice_idx >= 0, choice_idx, 0)
-
-    # Optionally enforce total cap (extremely rare to exceed with per-stat feasibility,
-    # but cheap to guard). Mark columns invalid if total > max_total.
-    totals = EV_mat.sum(axis=0)
-    col_valid &= (totals <= max_total)
-
-    # If too many invalid columns, you could resample IVs for those columns here.
-    # (We skip resampling and just let their weights go to zero.)
-
-    # ----- 3) weights: log w = log P(IV) + log P(EV) -----
-    # Shapes: (M,)
-    logP_E = prior_ev.getProb(EV_mat.T, asLog=True)           # (M,)
-    logP_IV = prior_iv.getLogProb(IV_mat)                     # (M,) — IV_mat is already (6,M)
-    logw = logP_E + logP_IV
+            feasible_ev_mask[s, iv_val, :] = mask
+            if not mask.any():
+                feasible_iv_mask[s, iv_val] = False
 
     if verbose:
-        print(f"there are {np.sum(col_valid)}/{len(col_valid)} valid samples")
+        total_ev_feasible = int(np.sum(feasible_ev_mask))
+        pruned_iv = int(np.sum(~feasible_iv_mask))
+        print(f"Total infeasible IV values pruned: {pruned_iv}/192")
+        print(f"Total feasible (s,iv,ev) combinations: {total_ev_feasible}")
 
-    # Any invalid columns ⇒ zero weight (−inf in log)
-    logw = np.where(col_valid, logw, -np.inf)
+    # ----- 2) build truncated IV proposal q_IV (per stat) -----
+    # Keep the original IV prior for the *target* P_prior_IV
+    prior_iv_full = prior_iv
 
-    # normalize weights safely
-    finite = np.isfinite(logw)
+    prior_iv_feas = prior_iv.P.copy()
+    prior_iv_feas = np.where(feasible_iv_mask, prior_iv_feas, 0.0)
+    row_sums = prior_iv_feas.sum(axis=1, keepdims=True)
+    prior_iv_feas = np.divide(
+        prior_iv_feas,
+        row_sums,
+        out=np.zeros_like(prior_iv_feas),
+        where=(row_sums > 0),
+    )
+    # This is q_IV
+    prior_iv_trunc = IV_PMF(prior=prior_iv_feas, rng=rng)
+
+    # ----- 3) accumulate batches until we have ~M valid samples or hit max_batches -----
+    IV_list: list[np.ndarray] = []
+    EV_list: list[np.ndarray] = []
+    logw_list: list[np.ndarray] = []
+
+    total_valid = 0
+    total_attempts = 0
+
+    for b in range(max_batches):
+        IV_batch, EV_batch, logw_batch, col_valid_batch = analytic_update_sample_batch(
+            prior_ev=prior_ev,
+            prior_iv_full=prior_iv_full,
+            prior_iv_trunc=prior_iv_trunc,
+            feasible_ev_mask=feasible_ev_mask,
+            max_ev=max_ev,
+            max_total=max_total,
+            batch_M=batch_size,
+            rng=rng,
+        )
+        total_attempts += batch_size
+
+        valid_idx = np.where(col_valid_batch)[0]
+        n_valid = valid_idx.size
+
+        if verbose:
+            print(
+                f"[batch {b+1}/{max_batches}] "
+                f"valid: {n_valid}/{batch_size} "
+                f"(cumulative valid: {total_valid + n_valid})"
+            )
+
+        if n_valid > 0:
+            IV_list.append(IV_batch[:, valid_idx])
+            EV_list.append(EV_batch[:, valid_idx])
+            logw_list.append(logw_batch[valid_idx])
+            total_valid += n_valid
+
+        if total_valid >= M:
+            break
+
+    if total_valid == 0:
+        # Fallback: no valid samples at all; just return the priors
+        if verbose:
+            print("No valid samples found; returning priors unchanged.")
+        return prior_ev, prior_iv_full
+
+    # Concatenate all valid samples
+    IV_all = np.concatenate(IV_list, axis=1)      # (6, total_valid)
+    EV_all = np.concatenate(EV_list, axis=1)      # (6, total_valid)
+    logw_all = np.concatenate(logw_list, axis=0)  # (total_valid,)
+
+    # ----- 4) normalize weights safely over all valid samples -----
+    finite = np.isfinite(logw_all)
     if not np.any(finite):
-        # fallback: uniform tiny weights to avoid NaNs; prior passes through
-        w = np.full(M, 1.0 / M, dtype=float)
+        # fallback: uniform weights over valid samples
+        w = np.full(total_valid, 1.0 / total_valid, dtype=float)
     else:
-        m = np.max(logw[finite])
-        w = np.zeros(M, dtype=float)
-        w[finite] = np.exp(logw[finite] - m)
-        Z = w.sum()
-        w = w / Z if Z > 0 else np.full(M, 1.0 / M, dtype=float)
+        m_max = float(np.max(logw_all[finite]))
+        w = np.zeros(total_valid, dtype=float)
+        w[finite] = np.exp(logw_all[finite] - m_max)
+        Z = float(w.sum())
+        w = w / Z if Z > 0 else np.full(total_valid, 1.0 / total_valid, dtype=float)
 
-    # ----- 4) re-build PMFs from weighted particles -----
-    new_ev_pmf = EV_PMF.from_samples(EV_mat.T, weights=w)
-    new_iv_pmf = IV_PMF.from_samples(IV_mat.T, weights=w)
+    if verbose:
+        print(f"Total valid samples collected: {total_valid} (attempted: {total_attempts})")
+
+    # ----- 5) re-build PMFs from weighted particles -----
+    # EV_all.T and IV_all.T are (N_valid, 6)
+    new_ev_pmf = EV_PMF.from_samples(EV_all.T, weights=w)
+    new_iv_pmf = IV_PMF.from_samples(IV_all.T, weights=w)
 
     return new_ev_pmf, new_iv_pmf
 

@@ -198,7 +198,7 @@ def main():
     # Here we just hardcode a plausible base statline for testing:
     base_stats = StatBlock(80, 95, 85, 65, 65, 90)  # HP, Atk, Def, SpA, SpD, Spe
     level = 50
-    nature = Nature(name="nuetral", inc=None, dec=None)
+    nature = Nature(name="neutral", inc=None, dec=None)
 
     # --- Ground-truth IV* and EV* ---
     iv_star = rng.integers(low=0, high=32, size=6)                  # (0..31)
@@ -303,7 +303,7 @@ def main():
     # Report EV marginal mass near ground-truth (±1)
     ev_marg_1 = post_ev_1.getMarginals(mc_samples=10000)  # (6, 253)
     ev_hit = [mass_near_ev(ev_marg_1[s], int(ev_star[s]), window=1) for s in range(6)]
-    print("Posterior EV mass near true EV (±1) per stat:", [f"{p:.3f}" for p in ev_hit])
+    print("Posterior EV mass near true EV per stat:", [f"{p:.3f}" for p in ev_hit])
     print(f"Mean EV mass near truth: {np.mean(ev_hit):.3f}")
     print()
 
@@ -329,7 +329,7 @@ def main():
 
     ev_marg_2 = post_ev_2.getMarginals(mc_samples=10000)
     ev_hit2 = [mass_near_ev(ev_marg_2[s], int(ev_star[s]), window=1) for s in range(6)]
-    print("Posterior EV mass near true EV (±1, hybrid) per stat:", [f"{p:.3f}" for p in ev_hit2])
+    print("Posterior EV mass near true EV per stat:", [f"{p:.3f}" for p in ev_hit2])
     print(f"Mean EV mass near truth (hybrid): {np.mean(ev_hit2):.3f}")
 
     print("\nDone.")
@@ -343,7 +343,8 @@ def main():
         level=level,
         base_stats=base_stats,
         nature=nature,
-        M=10000          # more particles -> tighter posterior
+        M=100000,          # more particles -> tighter posterior
+        verbose=True
     )
 
     iv_post_3 = post_iv_3.P  # (6, 32)
@@ -356,7 +357,7 @@ def main():
     # Report EV marginal mass near ground-truth (±1)
     ev_marg_3 = post_ev_3.getMarginals(mc_samples=10000)  # (6, 253)
     ev_hit3 = [mass_near_ev(ev_marg_3[s], int(ev_star[s]), window=1) for s in range(6)]
-    print("Posterior EV mass near true EV (±1) per stat:", [f"{p:.3f}" for p in ev_hit3])
+    print("Posterior EV mass near true EV per stat:", [f"{p:.3f}" for p in ev_hit3])
     print(f"Mean EV mass near truth: {np.mean(ev_hit3):.3f}")
     print()
 
