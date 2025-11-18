@@ -10,21 +10,47 @@ from matplotlib import pyplot as plt
 
 
 class RegimenSimulator:
-    def __init__(self, regimen: TrainingRegimen, species: SpeciesInfo, gen: int):
+    def __init__(self, regimen: TrainingRegimen, species: SpeciesInfo, gen: int, rng: np.random.Generator | None = None):
         self.regimen = regimen
         self.species = species
         self.gen = gen
+        self.rng = rng if rng is not None else np.random.default_rng()
         self.samples: List[StatBlock] = []
 
     def randomEncounter(self, encounters: List[EncounterOption]) -> Encounter:
         rates = np.array([enc.weight for enc in encounters], dtype=float)
         rates /= rates.sum()
-        option_choice = np.random.choice(len(encounters), p=rates)
-        level_choice = np.random.choice(encounters[option_choice].levels)
+        option_choice = self.rng.choice(len(encounters), p=rates)
+        level_choice = self.rng.choice(encounters[option_choice].levels)
         return Encounter(target=encounters[option_choice].target, level=level_choice)
 
-    # Simulate a single training block, returning resulting exp and EV gains.
     def simulateBlock(self, block: TrainingBlock, exp_start: int) -> tuple[int, StatBlock]:
+        """
+        Simulate a single training block.
+        
+        Returns the final EXP and accumulated EV gains after training through this block.
+        
+        Level overshoot behavior: This method is designed to allow EXP to overshoot the
+        exact threshold for block.end_level. The returned EXP value may correspond to a
+        level >= block.end_level (potentially strictly greater). This overshoot is
+        intentional and important: it encodes how far into the next level range the
+        training has progressed, and this information is preserved for use by later
+        logic to model training progression accurately.
+        
+        Parameters
+        ----------
+        block : TrainingBlock
+            The training block to simulate
+        exp_start : int
+            Starting EXP value (must correspond to block.start_level)
+        
+        Returns
+        -------
+        exp : int
+            Final EXP value after training (may exceed block.end_level threshold)
+        ev_gains : StatBlock
+            Accumulated EV gains during this block
+        """
         assert block.start_level == self.species.level_from_exp(exp_start)
         end_exp = self.species.exp_to_level(block.end_level)
         ev_gains = StatBlock(0, 0, 0, 0, 0, 0)
@@ -36,6 +62,7 @@ class RegimenSimulator:
             ev_gain = encounter.target.ev_yield
             exp += exp_gain
             ev_gains += ev_gain
+        # Note: exp is NOT clamped to end_exp here. Overshoot is preserved intentionally.
         return exp, ev_gains
 
     def simulate_trial(self, exp_start: int = 0) -> StatBlock:
