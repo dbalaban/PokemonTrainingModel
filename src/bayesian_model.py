@@ -436,6 +436,11 @@ def analytic_update_with_observation(
     if batch_size is None:
         batch_size = M  # default: try to get ~M valid from one batch
 
+    marginal_ev = prior_ev.getMarginals(mc_samples=1000000)  # (6, max_ev+1)
+    marginal_mask = marginal_ev > 0.0  # (6, max_ev+1)
+    if verbose:
+        print("EV marginal mass > 0 per stat:", [f"{np.sum(marginal_mask[s]):d}" for s in range(6)])
+
     # ----- 1) feasibility mask: (6, 32, max_ev+1) -----
     feasible_ev_mask = np.zeros((6, 32, max_ev + 1), dtype=bool)
     feasible_iv_mask = np.ones((6, 32), dtype=bool)
@@ -450,7 +455,7 @@ def analytic_update_with_observation(
                 iv=iv_val,
                 is_hp=is_hp,
             )
-            feasible_ev_mask[s, iv_val, :] = mask
+            feasible_ev_mask[s, iv_val, :] = mask & marginal_mask[s, :]
             if not mask.any():
                 feasible_iv_mask[s, iv_val] = False
 
