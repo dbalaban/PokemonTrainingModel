@@ -1,7 +1,12 @@
+import sys
+sys.path.insert(0, '../src')
+
 from data_structures import *
 from PMFs import EV_PMF
 from regimen_sim import RegimenSimulator
+from stat_tracker import track_training_stats
 import numpy as np
+import argparse
 
 # Regimen table:
 # | start lvl | end lvl | location                    | target      | aprx KOs | cum. Speed EVs   | cum. Attack EVs |
@@ -141,41 +146,66 @@ regimen = TrainingRegimen(blocks=[
 ])
 
 def main():
-    model = RegimenSimulator(
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Run Pokemon training regimen with stat tracking')
+    parser.add_argument('--M', type=int, default=20000,
+                        help='Number of Monte Carlo particles for Bayesian updates (default: 20000)')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Enable verbose output')
+    parser.add_argument('--debug-plots', action='store_true',
+                        help='Generate matplotlib plots of marginals after each observation')
+    args = parser.parse_args()
+
+    # Define observed stats at levels 12, 19, 20
+    # level 12 Riolu stats: 32 24 15 16 15 23
+    # level 19 Riolu stats: 46 35 22 23 21 35
+    # level 20 Riolu stats: 48 37 23 24 22 36
+    observations = [
+        ObservedStats(
+            level=12,
+            stats=StatBlock(hp=32, atk=24, def_=15, spa=16, spd=15, spe=23)
+        ),
+        ObservedStats(
+            level=19,
+            stats=StatBlock(hp=46, atk=35, def_=22, spa=23, spd=21, spe=35)
+        ),
+        ObservedStats(
+            level=20,
+            stats=StatBlock(hp=48, atk=37, def_=23, spa=24, spd=22, spe=36)
+        ),
+    ]
+
+    # Define nature (example: neutral nature with no stat modifiers)
+    nature = Nature(name="Hardy", inc=None, dec=None)
+
+    print("="*70)
+    print("Pokemon Training Regimen Tracker")
+    print("="*70)
+    print(f"\nSpecies: {Riolu.name}")
+    print(f"Nature: {nature.name}")
+    print(f"Base Stats: {Riolu.base_stats}")
+    print(f"\nTraining Regimen: {len(regimen.blocks)} blocks from level {regimen.blocks[0].start_level} to {regimen.blocks[-1].end_level}")
+    print(f"Observations: {len(observations)} measurements at levels {[obs.level for obs in observations]}")
+    print(f"\nMonte Carlo particles: {args.M}")
+    print(f"Verbose mode: {args.verbose}")
+    print(f"Debug plots: {args.debug_plots}")
+
+    # Run the tracker
+    final_ev_pmf, final_iv_pmf = track_training_stats(
         regimen=regimen,
-        species=Riolu,
-        gen=4
+        observations=observations,
+        base_stats=Riolu.base_stats,
+        nature=nature,
+        species_info=Riolu,
+        gen=4,
+        M=args.M,
+        verbose=args.verbose,
+        debug_plots=args.debug_plots,
     )
 
-    model.run_simulation(num_trials=10000, exp_start=0)
-
-    # show histogram of EV distributions
-    model.plot_ev_distributions()
-
-    # test the PMF representation
-    ev_pmf_multi = model.toPMF(allocator="multinomial")
-    ev_pmf_round = model.toPMF(allocator="round")
-    marginals_multi = ev_pmf_multi.getMarginals()
-    marginals_round = ev_pmf_round.getMarginals()
-    # transform samples from model into marginals
-    samples = np.array([[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in model.samples], dtype=float)
-    sample_marginals = []
-    for stat_idx in range(6):
-        counts, bin_edges = np.histogram(samples[:, stat_idx], bins=range(0, 254), density=True)
-        sample_marginals.append(counts)
-    sample_marginals = np.array(sample_marginals)  # shape (6, 253)
-    # normalize sample marginals to probabilities
-    sample_marginals = sample_marginals / sample_marginals.sum(axis=1, keepdims=True)
-    # compare
-    for stat_idx, stat_name in enumerate(['HP', 'Attack', 'Defense', 'Sp. Atk', 'Sp. Def', 'Speed']):
-        print(f"\nMarginal distribution for {stat_name}:")
-        print("EV Value\tPMF (Multi) Probability\tPMF (round) Probability\tSample Probability")
-        for ev_value in range(253):
-            pmf_prob_multi = marginals_multi[stat_idx][ev_value]
-            pmf_prob_round = marginals_round[stat_idx][ev_value]
-            sample_prob = sample_marginals[stat_idx][ev_value]
-            if pmf_prob_multi > 0 or pmf_prob_round > 0 or sample_prob > 0:
-                print(f"{ev_value}\t\t{pmf_prob_multi:.4f}\t\t{pmf_prob_round:.4f}\t\t{sample_prob:.4f}")
+    print("\n" + "="*70)
+    print("Training regimen tracking completed successfully!")
+    print("="*70)
 
 if __name__ == "__main__":
     main()
