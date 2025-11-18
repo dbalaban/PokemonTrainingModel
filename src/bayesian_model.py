@@ -421,7 +421,7 @@ def analytic_update_with_observation(
     if batch_size is None:
         batch_size = M  # default: try to get ~M valid from one batch
 
-    marginal_ev = prior_ev.getMarginals(mc_samples=1000000)  # (6, max_ev+1)
+    marginal_ev = prior_ev.getMarginals(mc_samples=M)  # (6, max_ev+1)
     marginal_mask = marginal_ev > 0.0  # (6, max_ev+1)
     if verbose:
         print("EV marginal mass > 0 per stat:", [f"{np.sum(marginal_mask[s]):d}" for s in range(6)])

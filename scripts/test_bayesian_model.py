@@ -269,10 +269,10 @@ def main():
     print(f"Mean IV mass at truth: {np.mean(iv_prior_mass):.3f}")
     print()
 
-    # Report prior EV marginal mass near ground-truth (±1)
+    # Report prior EV marginal mass near ground-truth
     ev_marg_prior = prior_ev.getMarginals(mc_samples=10000)  # (6, 253)
     ev_prior_hit = [mass_near_ev(ev_marg_prior[s], int(ev_star[s]), window=1) for s in range(6)]
-    print("Prior EV mass near true EV (±1) per stat:", [f"{p:.3f}" for p in ev_prior_hit])
+    print("Prior EV mass near true EV per stat:", [f"{p:.3f}" for p in ev_prior_hit])
     print(f"Mean EV mass near truth: {np.mean(ev_prior_hit):.3f}")
     print()
 
@@ -300,7 +300,7 @@ def main():
     print("Posterior IV mass at true IV per stat:", [f"{p:.3f}" for p in iv_hit])
     print(f"Mean IV mass at truth: {np.mean(iv_hit):.3f}")
 
-    # Report EV marginal mass near ground-truth (±1)
+    # Report EV marginal mass near ground-truth
     ev_marg_1 = post_ev_1.getMarginals(mc_samples=10000)  # (6, 253)
     ev_hit = [mass_near_ev(ev_marg_1[s], int(ev_star[s]), window=1) for s in range(6)]
     print("Posterior EV mass near true EV per stat:", [f"{p:.3f}" for p in ev_hit])
@@ -354,7 +354,7 @@ def main():
     print("Posterior IV mass at true IV per stat:", [f"{p:.3f}" for p in iv_hit3])
     print(f"Mean IV mass at truth: {np.mean(iv_hit3):.3f}")
 
-    # Report EV marginal mass near ground-truth (±1)
+    # Report EV marginal mass near ground-truth
     ev_marg_3 = post_ev_3.getMarginals(mc_samples=10000)  # (6, 253)
     ev_hit3 = [mass_near_ev(ev_marg_3[s], int(ev_star[s]), window=1) for s in range(6)]
     print("Posterior EV mass near true EV per stat:", [f"{p:.3f}" for p in ev_hit3])
