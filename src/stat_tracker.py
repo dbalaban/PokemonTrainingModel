@@ -186,12 +186,17 @@ def plot_marginals(
     ev_pmf: EV_PMF,
     iv_pmf: IV_PMF,
     title: str = "IV/EV Marginals",
+    output_dir: str = "plots",
+    counter: int = 0,
 ) -> None:
     """
-    Plot IV and EV marginal distributions using matplotlib.
+    Plot IV and EV marginal distributions on single plots with color-coded lines.
     
-    This function is optional and will fail gracefully if matplotlib is not available
-    or if running in a headless environment.
+    This function creates two separate plots:
+    - One for IV distributions (all stats on one plot with legend)
+    - One for EV distributions (all stats on one plot with legend)
+    
+    Stats where P(x=0)=1 are not plotted (assumed to be always 0).
     
     Parameters
     ----------
@@ -201,57 +206,113 @@ def plot_marginals(
         The IV PMF to plot
     title : str
         Title for the plot
+    output_dir : str
+        Directory to save the plots (default: "plots")
+    counter : int
+        Counter for ordering the plots in file names (default: 0)
     """
     try:
         import matplotlib.pyplot as plt
+        import os
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
         
         stat_names = ['HP', 'Attack', 'Defense', 'Sp. Atk', 'Sp. Def', 'Speed']
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
         
-        # Create figure with 2 rows (IV and EV)
-        fig, axes = plt.subplots(2, 6, figsize=(18, 8))
-        fig.suptitle(title, fontsize=16)
+        # Sanitize title for filename
+        safe_title = title.replace(' ', '_').replace('/', '_').lower()
         
-        # Plot IV marginals
+        # ==================== Plot IV marginals ====================
+        fig_iv, ax_iv = plt.subplots(figsize=(10, 6))
+        iv_values = np.arange(32)
+        
+        # Track which stats to plot
+        plotted_any_iv = False
+        
         for s_idx in range(6):
-            ax = axes[0, s_idx]
             marginal = iv_pmf.P[s_idx]
-            iv_values = np.arange(32)
-            ax.bar(iv_values, marginal, width=1.0, edgecolor='black', linewidth=0.5)
-            ax.set_xlabel('IV Value')
-            ax.set_ylabel('Probability')
-            ax.set_title(f'{stat_names[s_idx]} IV')
-            ax.set_xlim(-0.5, 31.5)
+            
+            # Check if P(x=0) = 1, which means stat is always 0
+            if marginal[0] > 0.9999:
+                # Skip plotting this stat
+                continue
+            
+            # Plot this stat
+            ax_iv.plot(iv_values, marginal, label=stat_names[s_idx], 
+                      color=colors[s_idx], linewidth=2, marker='o', markersize=3)
+            plotted_any_iv = True
         
-        # Plot EV marginals
-        ev_marginals = ev_pmf.getMarginals(mc_samples=5000)
-        for s_idx in range(6):
-            ax = axes[1, s_idx]
-            marginal = ev_marginals[s_idx]
-            ev_values = np.arange(len(marginal))
-            # Only plot non-zero range
-            nonzero = marginal > 1e-6
-            if np.any(nonzero):
-                min_ev = np.where(nonzero)[0][0]
-                max_ev = np.where(nonzero)[0][-1]
-                ax.bar(
-                    ev_values[min_ev:max_ev+1],
-                    marginal[min_ev:max_ev+1],
-                    width=1.0,
-                    edgecolor='black',
-                    linewidth=0.5
-                )
-                ax.set_xlim(min_ev - 1, max_ev + 1)
-            ax.set_xlabel('EV Value')
-            ax.set_ylabel('Probability')
-            ax.set_title(f'{stat_names[s_idx]} EV')
+        # Configure IV plot
+        ax_iv.set_xlim(0, 31)
+        ax_iv.set_ylim(0, 1)
+        ax_iv.set_xlabel('IV Value', fontsize=12)
+        ax_iv.set_ylabel('Probability', fontsize=12)
+        ax_iv.set_title(f'IV Distributions - {title}', fontsize=14)
+        ax_iv.grid(True, alpha=0.3)
         
+        if plotted_any_iv:
+            ax_iv.legend(loc='best', fontsize=10)
+        
+        # Save IV plot
+        iv_filename = os.path.join(output_dir, f"{counter:03d}_iv_{safe_title}.png")
         plt.tight_layout()
+        fig_iv.savefig(iv_filename, dpi=100)
+        print(f"IV plot saved to: {iv_filename}")
+        plt.close(fig_iv)
         
-        # Try to save the figure
-        filename = f"stat_tracker_{title.replace(' ', '_').lower()}.png"
-        plt.savefig(filename)
-        print(f"\nPlot saved to: {filename}")
-        plt.close(fig)
+        # ==================== Plot EV marginals ====================
+        fig_ev, ax_ev = plt.subplots(figsize=(10, 6))
+        
+        # Get EV marginals
+        ev_marginals = ev_pmf.getMarginals(mc_samples=5000)
+        
+        # Determine max EV value (252 per stat)
+        max_ev_value = 252
+        ev_values = np.arange(max_ev_value + 1)
+        
+        # Track which stats to plot
+        plotted_any_ev = False
+        
+        for s_idx in range(6):
+            marginal = ev_marginals[s_idx]
+            
+            # Check if P(x=0) = 1, which means stat is always 0
+            if len(marginal) > 0 and marginal[0] > 0.9999:
+                # Skip plotting this stat
+                continue
+            
+            # Pad marginal if needed
+            if len(marginal) <= max_ev_value:
+                padded_marginal = np.zeros(max_ev_value + 1)
+                padded_marginal[:len(marginal)] = marginal
+            else:
+                padded_marginal = marginal[:max_ev_value + 1]
+            
+            # Plot this stat
+            ax_ev.plot(ev_values, padded_marginal, label=stat_names[s_idx], 
+                      color=colors[s_idx], linewidth=2, marker='o', markersize=2, 
+                      markevery=max(1, max_ev_value // 20))
+            plotted_any_ev = True
+        
+        # Configure EV plot
+        ax_ev.set_xlim(0, max_ev_value)
+        ax_ev.set_ylim(0, 1)
+        ax_ev.set_xlabel('EV Value', fontsize=12)
+        ax_ev.set_ylabel('Probability', fontsize=12)
+        ax_ev.set_title(f'EV Distributions - {title}', fontsize=14)
+        ax_ev.grid(True, alpha=0.3)
+        
+        if plotted_any_ev:
+            ax_ev.legend(loc='best', fontsize=10)
+        
+        # Save EV plot
+        ev_filename = os.path.join(output_dir, f"{counter:03d}_ev_{safe_title}.png")
+        plt.tight_layout()
+        fig_ev.savefig(ev_filename, dpi=100)
+        print(f"EV plot saved to: {ev_filename}")
+        plt.close(fig_ev)
         
     except Exception as e:
         # Fail gracefully if matplotlib is not available or other errors occur
@@ -381,6 +442,9 @@ def track_training_stats(
     current_iv_pmf = iv_prior
     current_ev_pmf = ev_prior
     
+    # Counter for ordering debug plots
+    plot_counter = 0
+    
     for block_idx, block in enumerate(split_regimen.blocks):
         if verbose:
             print(f"\n{'='*70}")
@@ -405,9 +469,31 @@ def track_training_stats(
         # Convert samples to EV_PMF
         post_ev_sim = simulator.toPMF(allocator="round")
         
+        # Optional: plot after simulated EV additions (before combining with prior)
+        if debug_plots:
+            plot_marginals(
+                post_ev_sim,
+                current_iv_pmf,
+                title=f"Simulated EV Block {block_idx+1} Levels {block.start_level}-{block.end_level}",
+                output_dir="plots/simulated_ev",
+                counter=plot_counter,
+            )
+            plot_counter += 1
+        
         # Update EV prior by combining with simulation result
         from bayesian_model import update_ev_pmf
         current_ev_pmf = update_ev_pmf(current_ev_pmf, post_ev_sim, mode="linear")
+        
+        # Optional: plot updated PMF from simulator
+        if debug_plots:
+            plot_marginals(
+                current_ev_pmf,
+                current_iv_pmf,
+                title=f"Updated PMF Block {block_idx+1} Levels {block.start_level}-{block.end_level}",
+                output_dir="plots/updated_pmf",
+                counter=plot_counter,
+            )
+            plot_counter += 1
         
         # IV doesn't change during simulation (no observations yet in this block)
         # Keep current_iv_pmf as is
@@ -448,8 +534,11 @@ def track_training_stats(
                     plot_marginals(
                         current_ev_pmf,
                         current_iv_pmf,
-                        title=f"After Observation at Level {block.end_level}",
+                        title=f"Observation Update Level {block.end_level} Obs {obs_idx+1}",
+                        output_dir="plots/observation_update",
+                        counter=plot_counter,
                     )
+                    plot_counter += 1
     
     # 7. Print final histograms
     print_iv_histograms(current_iv_pmf, title="Final IV Marginal Distributions")
@@ -461,6 +550,8 @@ def track_training_stats(
             current_ev_pmf,
             current_iv_pmf,
             title="Final Posteriors",
+            output_dir="plots",
+            counter=plot_counter,
         )
     
     return current_ev_pmf, current_iv_pmf
