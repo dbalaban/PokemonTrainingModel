@@ -207,13 +207,13 @@ class IV_PMF:
             return pmf
         return pmf, {"counts": counts, "weights": w}
 
-# ========= EV PMF (stick-breaking + mandatory caps) =========
+# ========= EV PMF (Dirichlet-Multinomial + mandatory caps) =========
 
 class EV_PMF:
     """
     EV distribution parameterized by:
       - T: PMF over total EVs (0..510)
-      - W: 5 independent PMFs over stick-breaking variables s1..s5 in [0,1]
+      - alpha: Dirichlet concentration parameters (6,) for the 6 stats
 
     Allocator:
       - 'multinomial' : draws EV via capped multinomial with iterative repair (sum=T, each ≤ 252)
@@ -226,15 +226,13 @@ class EV_PMF:
     def __init__(
         self,
         priorT: np.ndarray | None = None,
-        priorW: np.ndarray | None = None,
-        w_bins: int = 506,
+        alpha: np.ndarray | None = None,
         rng: np.random.Generator | None = None,
         *,
         allocator: str = "round",   # 'multinomial' | 'round'
     ):
         self.n_stats = 6
         self.max_total_ev = 2 * self.MAX_EV + self.n_stats  # 510
-        self.w_bins = w_bins
         self.rng = rng if rng is not None else np.random.default_rng()
         self.allocator = allocator
 
@@ -244,56 +242,38 @@ class EV_PMF:
             self.T = np.full(self.max_total_ev + 1, 1.0/(self.max_total_ev + 1), dtype=float)
         self.T /= self.T.sum()
 
-        if priorW is not None:
-            assert priorW.shape == (5, self.w_bins); self.W = priorW.astype(float)
+        if alpha is not None:
+            assert alpha.shape == (6,); self.alpha = alpha.astype(float)
         else:
-            self.W = np.full((5, self.w_bins), 1.0/self.w_bins, dtype=float)
-        row_sums = self.W.sum(axis=1, keepdims=True)
-        self.W = np.divide(self.W, row_sums, out=self.W, where=(row_sums > 0))
-
-        self.s_grid = np.linspace(0.0, 1.0, self.w_bins)
+            # Uniform Dirichlet: all concentration parameters equal (symmetric)
+            self.alpha = np.ones(6, dtype=float)
+        
+        # Ensure alpha is positive
+        self.alpha = np.maximum(self.alpha, 1e-12)
 
     @property
     def max_ev(self) -> int:
         """Read-only property that returns the class-level per-stat EV cap."""
         return self.MAX_EV
 
-    # -- stick-breaking --
+    # -- Dirichlet sampling --
 
-    @staticmethod
-    def _stick_breaking_from_unit(S5: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-        S = np.clip(S5, eps, 1.0 - eps)
-        one_minus = 1.0 - S
-        cumprod = np.cumprod(one_minus, axis=0)
-        W6 = np.empty((6, S.shape[1]), dtype=S.dtype)
-        W6[0] = S[0]
-        W6[1] = cumprod[0] * S[1]
-        W6[2] = cumprod[1] * S[2]
-        W6[3] = cumprod[2] * S[3]
-        W6[4] = cumprod[3] * S[4]
-        W6[5] = cumprod[4]
+    def _sample_proportions(self, M: int) -> np.ndarray:
+        """
+        Sample M proportion vectors from Dirichlet(alpha).
+        
+        Returns
+        -------
+        W6 : (6, M) array where each column is a valid probability vector (sums to 1)
+        """
+        # Sample from Dirichlet using gamma trick: if X_i ~ Gamma(alpha_i, 1),
+        # then (X_1, ..., X_6) / sum(X_i) ~ Dirichlet(alpha)
+        shape = (self.n_stats, M)
+        W6 = self.rng.gamma(self.alpha[:, None], 1.0, size=shape)
+        # Normalize columns to sum to 1
+        col_sums = W6.sum(axis=0, keepdims=True)
+        W6 = np.divide(W6, col_sums, out=W6, where=(col_sums > 0))
         return W6
-
-    @staticmethod
-    def _invert_stick_breaking(w: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-        S = np.empty(5, dtype=float); rem = 1.0
-        for k in range(5):
-            s_k = 0.0 if rem <= eps else w[k] / rem
-            S[k] = np.clip(s_k, 0.0, 1.0); rem *= (1.0 - S[k])
-        return S
-
-    # -- sampling primitives --
-
-    def _sample_S5(self, M: int) -> np.ndarray:
-        B = self.w_bins
-        row_sums = self.W.sum(axis=1, keepdims=True)
-        W_row = np.divide(self.W, row_sums, out=np.zeros_like(self.W), where=(row_sums > 0))
-        cdfs = np.cumsum(W_row, axis=1); cdfs[:, -1] = 1.0
-        u = self.rng.random((5, M))
-        idx = np.empty((5, M), dtype=int)
-        for r in range(5): idx[r] = np.searchsorted(cdfs[r], u[r], side='right')
-        idx = np.minimum(idx, B - 1)
-        return self.s_grid[idx]
 
     def _sample_totals(self, M: int) -> np.ndarray:
         cdf = np.cumsum(self.T); cdf[-1] = 1.0
@@ -400,16 +380,14 @@ class EV_PMF:
     # -- public sampling / marginals --
 
     def sample(self, M: int, *, allocator: Optional[str] = None) -> np.ndarray:
-        S5 = self._sample_S5(M)
-        W6 = self._stick_breaking_from_unit(S5)
+        W6 = self._sample_proportions(M)
         T_idx = self._sample_totals(M)
         EV_mat = self._allocate_EV(T_idx, W6, allocator)
         return EV_mat.T
 
     def getMarginals(self, mc_samples: int = 5000, *, allocator: Optional[str] = None) -> np.ndarray:
         nS, maxEV = self.n_stats, self.max_ev
-        S5 = self._sample_S5(mc_samples)
-        W6 = self._stick_breaking_from_unit(S5)
+        W6 = self._sample_proportions(mc_samples)
         T_idx = self._sample_totals(mc_samples)
         EV_mat = self._allocate_EV(T_idx, W6, allocator)  # (6, M)
         marginals = np.zeros((nS, maxEV + 1), dtype=float)
@@ -424,10 +402,8 @@ class EV_PMF:
     def getProb(self, EV: np.ndarray, asLog: bool = False) -> np.ndarray:
         """
         Return P(EV) under this EV_PMF, computed (in log-space) as:
-            log P(EV) = log P(T) + sum_{r=1..5} log P_r(S_r)
-        where T = sum(EV), W6 = EV / T (with T=0 → [0,0,0,0,0,1]),
-        S = invert_stick_breaking(W6[0:5]), and each S_r is binned to the
-        nearest of `w_bins` centers to read off row-wise probabilities in self.W.
+            log P(EV) = log P(T) + log Dirichlet_pmf(W6 | alpha)
+        where T = sum(EV), W6 = EV / T (with T=0 → [1/6, 1/6, 1/6, 1/6, 1/6, 1/6])
 
         Parameters
         ----------
@@ -447,6 +423,8 @@ class EV_PMF:
         exceeding max_total_ev are infeasible. This ensures strict adherence to
         game mechanics and prevents invalid states from receiving probability mass.
         """
+        from scipy.special import gammaln, logsumexp
+        
         E = np.asarray(EV, dtype=float)
         scalar_input = False
         if E.ndim == 1:
@@ -461,17 +439,14 @@ class EV_PMF:
         log_probs = np.full(N, -np.inf, dtype=float)
 
         # Validity checks: per-stat caps and total cap
-        # Per-stat EV values exceeding max_ev are infeasible
         per_stat_ok = (E >= 0.0) & (E <= self.max_ev + 1e-9)
         per_row_ok = per_stat_ok.all(axis=1)
 
         T = E.sum(axis=1).astype(int)  # totals
-        # Total EV values exceeding max_total_ev are infeasible
         total_ok = (T >= 0) & (T <= self.max_total_ev)
 
         valid = per_row_ok & total_ok
         if not np.any(valid):
-            # Nothing valid: return all -inf (or zeros if asLog=False)
             if asLog:
                 return log_probs[0] if scalar_input else log_probs
             out = np.zeros(N, dtype=float)
@@ -482,42 +457,51 @@ class EV_PMF:
             logT = np.full(N, -np.inf, dtype=float)
             logT[valid] = np.log(self.T[T[valid]])
 
-        # Map valid EV rows to W6 proportions (handle T=0 → [0,0,0,0,0,1])
+        # Map valid EV rows to W6 proportions (handle T=0 → uniform)
         E_sub = E[valid, :]                  # (K,6)
         T_sub = T[valid]                     # (K,)
         with np.errstate(divide="ignore", invalid="ignore"):
             W6 = np.divide(E_sub, T_sub[:, None], out=np.zeros_like(E_sub), where=(T_sub[:, None] > 0))
         zero_tot = (T_sub == 0)
         if np.any(zero_tot):
-            W6[zero_tot] = 0.0
-            W6[zero_tot, 5] = 1.0
+            W6[zero_tot] = 1.0 / 6.0  # Uniform for T=0
 
-        # Invert stick-breaking per row to S5 in [0,1]
+        # Dirichlet log-density: log Dir(w | alpha) = log Gamma(sum alpha) - sum log Gamma(alpha_i) + sum (alpha_i - 1) log w_i
+        # However, for discrete EVs, we need to integrate over a small region around W6
+        # For simplicity, we'll use a point-mass approximation at the exact proportions
         K = W6.shape[0]
-        S5 = np.empty((K, 5), dtype=float)
-        for i in range(K):
-            S5[i] = self._invert_stick_breaking(W6[i])
-
-        # Bin S5 to nearest centers in [0,1] with B bins
-        B = self.w_bins
-        idx = np.rint(S5 * (B - 1)).astype(int)
-        np.clip(idx, 0, B - 1, out=idx)  # (K,5)
-
-        # Extract W values at binned indices W[r, idx[i,r]] for each row r and sample i
-        # W is (5, B), idx is (K, 5); we want to extract W[r, idx[i,r]] for each r in 0..4, i in 0..K-1
-        K = idx.shape[0]
-        W_rows = np.empty((K, 5), dtype=float)
-        for r in range(5):
-            W_rows[:, r] = self.W[r, idx[:, r]]
-        any_zero = np.any(W_rows == 0, axis=1)  # (K,) bool
-
-        # Sum row-wise log-probs: sum_r log W[r, idx_r]
+        
+        # Dirichlet PDF at W6
+        # log Dir(w | alpha) = log Gamma(alpha_0) - sum log Gamma(alpha_i) + sum (alpha_i - 1) log w_i
+        # where alpha_0 = sum(alpha)
+        alpha_sum = self.alpha.sum()
+        log_norm = gammaln(alpha_sum) - gammaln(self.alpha).sum()
+        
+        # sum (alpha_i - 1) log w_i for each sample
+        # Handle zeros in W6 properly
         with np.errstate(divide="ignore", invalid="ignore"):
-            row_log = np.sum(np.log(np.clip(W_rows, 1e-300, 1.0)), axis=1)  # (K,)
-            row_log[any_zero] = -np.inf
+            log_w6 = np.log(np.clip(W6, 1e-300, 1.0))  # (K, 6)
+        
+        # For each row, compute sum (alpha_i - 1) * log(w_i)
+        alpha_minus_1 = self.alpha - 1.0  # (6,)
+        log_dir = np.sum(alpha_minus_1[None, :] * log_w6, axis=1)  # (K,)
+        log_dir += log_norm
+        
+        # Handle cases where W6 has zeros (should only happen if alpha_i >= 1 for all i)
+        # If alpha_i < 1 and w_i = 0, density is infinite (but we clipped to avoid -inf)
+        # If alpha_i = 1 (uniform), w_i = 0 is density 0
+        # If alpha_i > 1, w_i = 0 is density 0
+        
+        # For zero-total cases, use uniform Dirichlet
+        if np.any(zero_tot):
+            uniform_alpha = np.ones(6)
+            alpha_sum_uniform = 6.0
+            log_norm_uniform = gammaln(alpha_sum_uniform) - gammaln(uniform_alpha).sum()
+            alpha_minus_1_uniform = uniform_alpha - 1.0
+            log_dir[zero_tot] = log_norm_uniform  # All w_i = 1/6, so log(1/6) * 0 = 0
 
         # Combine for valid rows
-        log_probs[valid] = logT[valid] + row_log
+        log_probs[valid] = logT[valid] + log_dir
 
         if asLog:
             return log_probs[0] if scalar_input else log_probs
@@ -538,14 +522,12 @@ class EV_PMF:
     @staticmethod
     def from_samples(
         samples: "np.ndarray | list[StatBlock]",
-        w_bins: int = 506,
         *,
         return_coords: bool = False,
         rng: np.random.Generator | None = None,
         allocator: str = "round",
         weights: "np.ndarray | list[float] | None" = None,
-        smooth_W: bool = False,
-        smooth_eps: float = 1e-8,
+        alpha_smoothing: float = 0.0,
     ) -> "EV_PMF | tuple[EV_PMF, dict[str, np.ndarray]]":
         """
         Build an EV_PMF from EV samples, optionally weighted.
@@ -553,12 +535,10 @@ class EV_PMF:
         Parameters
         ----------
         samples : (N,6) integer EVs or list[StatBlock]
-        w_bins  : number of bins for each of the 5 stick-breaking rows
-        return_coords : also return {'totals','W6','S5'} if True
+        return_coords : also return {'totals','W6','alpha'} if True
         rng, allocator : forwarded to EV_PMF constructor
         weights : optional (N,) nonnegative weights; if None, uniform
-        smooth_W : if True, add small epsilon to W rows before normalization (default: False)
-        smooth_eps : epsilon value for smoothing (default: 1e-8)
+        alpha_smoothing : additive smoothing for alpha estimates (default: 0.0)
 
         Returns
         -------
@@ -598,37 +578,44 @@ class EV_PMF:
         Ts = T_hist.sum()
         T_hist = (T_hist / Ts) if Ts > 0 else np.full(max_total_ev + 1, 1.0 / (max_total_ev + 1))
 
-        # --- 2) Weighted stick-breaking rows via sample proportions ---
+        # --- 2) Estimate Dirichlet alpha from proportions ---
+        # Compute proportions W6 for each sample
         with np.errstate(divide="ignore", invalid="ignore"):
             W6 = np.divide(ev_array, totals[:, None], out=np.zeros_like(ev_array), where=(totals[:, None] > 0))
         zero_tot = (totals == 0)
         if np.any(zero_tot):
-            W6[zero_tot] = 0.0
-            W6[zero_tot, 5] = 1.0
+            W6[zero_tot] = 1.0 / 6.0  # Uniform for zero totals
 
-        # invert stick-breaking per sample → S5 in [0,1]
-        S5 = np.empty((N, 5), dtype=float)
-        for i in range(N):
-            S5[i] = EV_PMF._invert_stick_breaking(W6[i])
+        # Method of moments estimate for Dirichlet alpha:
+        # E[W_i] = alpha_i / alpha_0, Var[W_i] = alpha_i(alpha_0 - alpha_i) / (alpha_0^2 (alpha_0 + 1))
+        # We use: mean_i = weighted mean of W6[:, i], var_i = weighted variance
+        # Then solve for alpha_i and alpha_0
+        
+        mean_W = np.average(W6, axis=0, weights=w)  # (6,)
+        # Weighted variance
+        var_W = np.average((W6 - mean_W[None, :])**2, axis=0, weights=w)  # (6,)
+        
+        # From Dirichlet properties:
+        # mean_i = alpha_i / alpha_0
+        # var_i = mean_i * (1 - mean_i) / (alpha_0 + 1)
+        # Solving for alpha_0: alpha_0 = mean_i * (1 - mean_i) / var_i - 1
+        # We take the mean across all stats for robustness
+        
+        # Avoid division by zero
+        var_W = np.maximum(var_W, 1e-12)
+        mean_W = np.clip(mean_W, 1e-6, 1 - 1e-6)
+        
+        # Estimate alpha_0 from each stat and take median for robustness
+        alpha_0_estimates = mean_W * (1.0 - mean_W) / var_W - 1.0
+        alpha_0_estimates = np.clip(alpha_0_estimates, 0.1, 1e6)  # Reasonable bounds
+        alpha_0 = np.median(alpha_0_estimates)
+        
+        # Estimate individual alphas
+        alpha = mean_W * alpha_0 + alpha_smoothing
+        alpha = np.maximum(alpha, 1e-6)  # Ensure positive
 
-        # bin S5 with weights
-        B = w_bins
-        idx = np.rint(S5 * (B - 1)).astype(int)
-        np.clip(idx, 0, B - 1, out=idx)
-
-        W_counts = np.zeros((5, B), dtype=float)
-        for r in range(5):
-            W_counts[r] = np.bincount(idx[:, r], weights=w, minlength=B)
-
-        # Apply optional smoothing to W before normalization
-        if smooth_W:
-            W_counts += smooth_eps
-
-        row_sums = W_counts.sum(axis=1, keepdims=True)
-        W_hist = np.divide(W_counts, row_sums, out=np.zeros_like(W_counts), where=(row_sums > 0))
-
-        pmf = EV_PMF(priorT=T_hist, priorW=W_hist, w_bins=B, rng=rng, allocator=allocator)
+        pmf = EV_PMF(priorT=T_hist, alpha=alpha, rng=rng, allocator=allocator)
 
         if not return_coords:
             return pmf
-        return pmf, {"totals": totals, "W6": W6, "S5": S5}
+        return pmf, {"totals": totals, "W6": W6, "alpha": alpha}

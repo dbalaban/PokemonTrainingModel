@@ -71,19 +71,18 @@ def test_all_fixes():
     print("   ✓ EV_PMF.MAX_EV is a shared constant with read-only property")
     
     # Test 5: Optional smoothing
-    print("\n5. Testing EV_PMF optional smoothing...")
+    print("\n5. Testing EV_PMF optional alpha smoothing...")
     ev_samples = np.array([
         [100, 100, 100, 100, 100, 10],
         [100, 100, 100, 100, 100, 10],
     ], dtype=float)
     
-    ev_pmf_strict = EV_PMF.from_samples(ev_samples, w_bins=50, smooth_W=False)
-    ev_pmf_smooth = EV_PMF.from_samples(ev_samples, w_bins=50, smooth_W=True, smooth_eps=1e-6)
+    ev_pmf_strict = EV_PMF.from_samples(ev_samples, alpha_smoothing=0.0)
+    ev_pmf_smooth = EV_PMF.from_samples(ev_samples, alpha_smoothing=1.0)
     
-    zeros_strict = (ev_pmf_strict.W == 0).sum()
-    zeros_smooth = (ev_pmf_smooth.W == 0).sum()
-    assert zeros_smooth <= zeros_strict
-    print(f"   ✓ Smoothing reduces zeros: {zeros_strict} → {zeros_smooth}")
+    # Smoothing should increase all alpha values
+    assert np.all(ev_pmf_smooth.alpha >= ev_pmf_strict.alpha)
+    print(f"   ✓ Alpha smoothing increases concentration parameters")
     
     # Test 6: Per-stat cap enforcement
     print("\n6. Testing per-stat EV cap enforcement...")
