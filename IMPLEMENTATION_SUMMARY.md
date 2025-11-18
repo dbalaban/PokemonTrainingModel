@@ -136,7 +136,75 @@ From the original issue:
 - [x] EV/IV update code runs without shape-related errors
 - [x] No noisy debug prints during normal usage (unless verbose=True)
 
+### 9. End-to-End Stat Tracker Module ✓
+**Files:** `src/stat_tracker.py`, `scripts/run_regimen.py`, `scripts/test_stat_tracker.py`
+
+#### New Module: stat_tracker.py
+- **`split_regimen_at_levels()`**: Helper function that splits regimen blocks at observation levels
+  - Ensures every observation level coincides with a block boundary
+  - Supports multiple splits within the same original block
+  - Returns a new TrainingRegimen with split blocks
+  
+- **`track_training_stats()`**: Main entry point for full IV/EV tracking pipeline
+  - Accepts: TrainingRegimen, list of ObservedStats, base stats, nature, species info
+  - Returns: Final (EV_PMF, IV_PMF) posteriors after all observations
+  - Process:
+    1. Sorts and validates observations by level
+    2. Splits regimen at observation levels
+    3. Initializes priors:
+       - IV: uniform distribution over [0, 31] for each stat
+       - EV: delta at zero (P(T=0) = 1, consistent allocation)
+    4. Iterates over blocks:
+       - Runs RegimenSimulator to model EV gains during training
+       - Updates EV prior by combining with simulation result
+       - At block boundaries matching observation levels:
+         - Applies analytic_update_with_observation for Bayesian updates
+         - Updates both IV and EV posteriors
+    5. Prints final IV/EV histograms
+    6. Optional: generates matplotlib plots if debug_plots=True
+
+- **Helper Functions**:
+  - `print_iv_histograms()`: Display marginal IV distributions with ASCII bar charts
+  - `print_ev_histograms()`: Display marginal EV distributions (binned for large ranges)
+  - `plot_marginals()`: Optional matplotlib plotting (fails gracefully in headless environments)
+
+#### Updated: run_regimen.py
+- Removed manual simulation and multinomial allocator code
+- Added command-line argument parsing:
+  - `--M`: Number of Monte Carlo particles (default: 20000)
+  - `--verbose`: Enable detailed progress output
+  - `--debug-plots`: Generate matplotlib plots after each observation
+- Creates ObservedStats for Riolu at levels 12, 19, 20 with specified stats:
+  - Level 12: `StatBlock(hp=32, atk=24, def_=15, spa=16, spd=15, spe=23)`
+  - Level 19: `StatBlock(hp=46, atk=35, def_=22, spa=23, spd=21, spe=35)`
+  - Level 20: `StatBlock(hp=48, atk=37, def_=23, spa=24, spd=22, spe=36)`
+- Calls `track_training_stats()` as single high-level entry point
+- Prints final IV/EV marginal distributions
+
+#### Tests: test_stat_tracker.py
+- **`test_split_regimen_at_levels()`**: Verifies block splitting logic
+  - Split inside blocks
+  - Multiple splits
+  - Boundary splits (no-ops)
+  - Empty split list
+  
+- **`test_track_training_stats_basic()`**: Basic functionality test
+  - Runs complete pipeline on simple example
+  - Verifies PMFs are properly normalized
+  - Checks output shapes
+  
+- **`test_validation_errors()`**: Input validation tests
+  - Observations outside regimen range
+  - Proper error messages
+
+**Test Results:** All tests pass. Manual verification shows:
+- Non-trivial IV distributions after observations (not uniform)
+- Concentrated EV distributions (e.g., Attack ~47 EVs, Speed ~56 EVs)
+- Proper handling of infeasible observations (returns priors unchanged)
+
 ## Commits
 1. `172d7b8` - Fix StatBlock indexing, IV_PMF.getProb, type imports, EV_PMF.MAX_EV, add helpers, comments, verbose flags, and RNG injection
 2. `ecbc54a` - Add optional smoothing for EV_PMF with smooth_W parameter
 3. `dfaefc9` - Add comprehensive integration test covering all fixes
+4. `7637b30` - Add stat_tracker.py module and update run_regimen.py
+5. `de8b249` - Add comprehensive tests for stat_tracker module
