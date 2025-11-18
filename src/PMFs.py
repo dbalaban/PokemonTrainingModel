@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 import numpy as np
+from numpy import ndarray
+from numpy.typing import NDArray
 from typing import Optional, Tuple, Dict, Any, List
 
 from data_structures import *  # StatBlock, etc.
@@ -75,22 +77,41 @@ class IV_PMF:
             idx[s] = np.searchsorted(cdf[s], u[s], side="right")
         return np.clip(idx, 0, 31)
 
-    def getProb(self, IV : ndarray) -> ndarray:
+    def getProb(self, IV: np.ndarray) -> np.ndarray:
         """
-        Return P(IV) under this PMF
-        IV: Nx6 array
-        Return: N narray of total probs
+        Return P(IV) under this PMF.
+        
+        Parameters
+        ----------
+        IV : shape (6,) or (6, M) array of integer IVs in [0..31]
+             For a single IV vector, use shape (6,).
+             For M samples, use shape (6, M).
+        
+        Returns
+        -------
+        scalar (if IV is (6,)) or (M,) ndarray of probabilities
         """
-        PoIVs = self.prior[np.arange(6), np.asarray(IV, dtype=int)]
-        return np.prod(PoIVs, axis=0)
+        logP = self.getLogProb(IV)
+        return np.exp(logP)
 
     def getLogProb(self, IV: NDArray[np.integer] | NDArray[np.floating]) -> np.ndarray:
         """
         Return log P(IV) under the row-wise prior.
-        - IV shape: (6,) or (6, M), with entries in 0..31
-        - Output: scalar (if IV is (6,)) or (M,) for a batch.
-        Zeros in the prior produce -inf (no smoothing).
-        Out-of-range IV indices are treated as probability 0 → -inf.
+        
+        Parameters
+        ----------
+        IV : shape (6,) or (6, M) array of integer IVs in [0..31]
+             For a single IV vector, use shape (6,).
+             For M samples, use shape (6, M).
+        
+        Returns
+        -------
+        scalar (if IV is (6,)) or (M,) ndarray of log-probabilities
+        
+        Notes
+        -----
+        - Zeros in the prior produce -inf (no smoothing).
+        - Out-of-range IV indices are treated as probability 0 → -inf.
         """
         idx = np.asarray(IV, dtype=int)
         scalar_input = idx.ndim == 1
@@ -199,6 +220,9 @@ class EV_PMF:
       - 'round'       : deterministic proportional rounding with caps (vectorized)
     """
 
+    # Class-level constant for per-stat EV cap (shared by all instances)
+    MAX_EV: int = 252
+
     def __init__(
         self,
         priorT: np.ndarray | None = None,
@@ -208,9 +232,8 @@ class EV_PMF:
         *,
         allocator: str = "round",   # 'multinomial' | 'round'
     ):
-        self.max_ev = 252
         self.n_stats = 6
-        self.max_total_ev = 2 * self.max_ev + self.n_stats  # 510
+        self.max_total_ev = 2 * self.MAX_EV + self.n_stats  # 510
         self.w_bins = w_bins
         self.rng = rng if rng is not None else np.random.default_rng()
         self.allocator = allocator
@@ -229,6 +252,11 @@ class EV_PMF:
         self.W = np.divide(self.W, row_sums, out=self.W, where=(row_sums > 0))
 
         self.s_grid = np.linspace(0.0, 1.0, self.w_bins)
+
+    @property
+    def max_ev(self) -> int:
+        """Read-only property that returns the class-level per-stat EV cap."""
+        return self.MAX_EV
 
     # -- stick-breaking --
 
@@ -276,8 +304,21 @@ class EV_PMF:
 
     @staticmethod
     def _round_allocations_to_totals(alloc: np.ndarray, totals: np.ndarray, max_ev: int) -> np.ndarray:
+        """
+        Round fractional EV allocations to integers while enforcing:
+        1. Total EV sum equals `totals` for each sample
+        2. Per-stat EV does not exceed `max_ev` (typically 252)
+        
+        Per-stat EV cap enforcement: Any EV value that would exceed max_ev for a stat
+        is treated as infeasible and capped at max_ev. This ensures adherence to game
+        mechanics where individual stat EVs cannot exceed the per-stat cap.
+        
+        Note: If the total cannot be achieved due to per-stat caps, the function
+        distributes as much as possible without violating caps.
+        """
         alloc = np.maximum(alloc, 0.0)
         ev_floor = np.floor(alloc).astype(int)
+        # Enforce per-stat cap: values above max_ev are infeasible
         ev_floor = np.clip(ev_floor, 0, max_ev)
         remaining = totals - ev_floor.sum(axis=0)
         if not np.any(remaining): return ev_floor
@@ -288,6 +329,7 @@ class EV_PMF:
             if not np.any(remaining > 0): break
             rows = order[k, np.arange(alloc.shape[1])]
             cols = np.arange(alloc.shape[1])
+            # Enforce per-stat cap: cannot exceed max_ev
             cap  = max_ev - out[rows, cols]
             inc  = (remaining > 0).astype(int)
             inc  = np.minimum(inc, cap)
@@ -297,6 +339,7 @@ class EV_PMF:
             cols = np.where(remaining > 0)[0]
             for r in range(6):
                 if cols.size == 0: break
+                # Enforce per-stat cap: cannot exceed max_ev
                 cap = max_ev - out[r, cols]
                 add = np.minimum(cap, remaining[cols])
                 out[r, cols] += add
@@ -396,6 +439,13 @@ class EV_PMF:
         -------
         out : scalar (if EV shape (6,)) or (N,) ndarray
             log-probs if asLog=True, probs otherwise.
+        
+        Notes
+        -----
+        Per-stat EV cap enforcement: Any EV value exceeding max_ev for a stat is
+        treated as infeasible (probability = 0, log-prob = -inf). Similarly, totals
+        exceeding max_total_ev are infeasible. This ensures strict adherence to
+        game mechanics and prevents invalid states from receiving probability mass.
         """
         E = np.asarray(EV, dtype=float)
         scalar_input = False
@@ -411,10 +461,12 @@ class EV_PMF:
         log_probs = np.full(N, -np.inf, dtype=float)
 
         # Validity checks: per-stat caps and total cap
+        # Per-stat EV values exceeding max_ev are infeasible
         per_stat_ok = (E >= 0.0) & (E <= self.max_ev + 1e-9)
         per_row_ok = per_stat_ok.all(axis=1)
 
         T = E.sum(axis=1).astype(int)  # totals
+        # Total EV values exceeding max_total_ev are infeasible
         total_ok = (T >= 0) & (T <= self.max_total_ev)
 
         valid = per_row_ok & total_ok
@@ -492,6 +544,8 @@ class EV_PMF:
         rng: np.random.Generator | None = None,
         allocator: str = "round",
         weights: "np.ndarray | list[float] | None" = None,
+        smooth_W: bool = False,
+        smooth_eps: float = 1e-8,
     ) -> "EV_PMF | tuple[EV_PMF, dict[str, np.ndarray]]":
         """
         Build an EV_PMF from EV samples, optionally weighted.
@@ -503,6 +557,8 @@ class EV_PMF:
         return_coords : also return {'totals','W6','S5'} if True
         rng, allocator : forwarded to EV_PMF constructor
         weights : optional (N,) nonnegative weights; if None, uniform
+        smooth_W : if True, add small epsilon to W rows before normalization (default: False)
+        smooth_eps : epsilon value for smoothing (default: 1e-8)
 
         Returns
         -------
@@ -531,7 +587,8 @@ class EV_PMF:
             s = w.sum()
             w = (w / s) if s > 0 else np.full(N, 1.0 / max(N, 1), dtype=float)
 
-        max_ev = 252
+        # Use class constant for per-stat EV cap
+        max_ev = EV_PMF.MAX_EV
         max_total_ev = 2 * max_ev + 6  # 510
 
         # --- 1) Weighted PMF over totals T ---
@@ -562,6 +619,10 @@ class EV_PMF:
         W_counts = np.zeros((5, B), dtype=float)
         for r in range(5):
             W_counts[r] = np.bincount(idx[:, r], weights=w, minlength=B)
+
+        # Apply optional smoothing to W before normalization
+        if smooth_W:
+            W_counts += smooth_eps
 
         row_sums = W_counts.sum(axis=1, keepdims=True)
         W_hist = np.divide(W_counts, row_sums, out=np.zeros_like(W_counts), where=(row_sums > 0))

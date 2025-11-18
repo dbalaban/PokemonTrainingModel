@@ -27,8 +27,13 @@ def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
     mode: "linear" or "geometric"
     """
     # ---- 1) Update T via convolution ----
+    # Convolve prior and update total EV distributions.
+    # Truncate at max_total_ev: any mass that would push total beyond max_total_ev
+    # is dropped (not folded into the final bin). This is intentional because
+    # totals > max_total_ev are infeasible states and should have probability 0.
     new_T = np.convolve(prior.T, upd.T)[:prior.max_total_ev + 1]
     s = new_T.sum()
+    # Renormalize after truncation to account for dropped overflow mass
     new_T = new_T / s if s > 0 else prior.T.copy()
 
     # ---- 2) Update W using only expected totals as masses ----
@@ -56,8 +61,8 @@ def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
 
     return EV_PMF(priorT=new_T, priorW=new_W, w_bins=prior.w_bins)
 
-def _sb_to_arr(sb: StatBlock) -> np.ndarray:
-    return np.array([sb.hp, sb.atk, sb.def_, sb.spa, sb.spd, sb.spe], dtype=int)
+# Use centralized helper for StatBlock ↔ array conversion
+_sb_to_arr = statblock_to_array
 
 def _t_candidates(y: int, n: float) -> range:
     """
@@ -160,6 +165,7 @@ def hybrid_ev_iv_update(
     tol: int = 0,
     max_iters: int = 5,
     iv_tv_tol: float = 1e-4,
+    verbose: bool = False,
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
     Hybrid alternating update (no corners):
@@ -180,7 +186,8 @@ def hybrid_ev_iv_update(
         nature.modifier(StatType.SPEED),
     ], dtype=float)
 
-    for _ in tqdm(range(max_iters), desc="Hybrid EV/IV update"):
+    iterator = tqdm(range(max_iters), desc="Hybrid EV/IV update") if verbose else range(max_iters)
+    for _ in iterator:
         # ----- (1) IV update via exact inversion + EV marginals -----
         ev_marg = ev_post.getMarginals(mc_samples=10000)  # (6, 253)
         old_P = iv_post.P.copy()
@@ -272,6 +279,7 @@ def analytic_update_with_observation(
     base_stats: StatBlock,
     nature: Nature,
     M: int = 20000,
+    verbose: bool = False,
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
     One-shot update using IV-only sampling + analytic EV feasibility.
@@ -349,7 +357,8 @@ def analytic_update_with_observation(
     logP_IV = prior_iv.getLogProb(IV_mat)                     # (M,) — IV_mat is already (6,M)
     logw = logP_E + logP_IV
 
-    print(f"there are {np.sum(col_valid)}/{len(col_valid)} valid samples")
+    if verbose:
+        print(f"there are {np.sum(col_valid)}/{len(col_valid)} valid samples")
 
     # Any invalid columns ⇒ zero weight (−inf in log)
     logw = np.where(col_valid, logw, -np.inf)
@@ -383,6 +392,7 @@ def update_with_observation(
     nature: Nature,
     M: int = 20000,
     tol: int = 0,
+    verbose: bool = False,
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
     One-shot importance update with proposal q(EV,IV) = prior_ev × prior_iv.
