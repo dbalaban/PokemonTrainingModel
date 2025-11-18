@@ -262,6 +262,114 @@ def hybrid_ev_iv_update(
 
     return ev_post, iv_post
 
+# --------------------------- Analytic IS Update ------------------------------------------
+
+def analytic_update_with_observation(
+    prior_ev: EV_PMF,
+    prior_iv: IV_PMF,
+    obs_stats: StatBlock,
+    level: int,
+    base_stats: StatBlock,
+    nature: Nature,
+    M: int = 20000,
+) -> Tuple[EV_PMF, IV_PMF]:
+    """
+    One-shot update using IV-only sampling + analytic EV feasibility.
+
+    Steps
+    -----
+    1) Precompute feasible EV mask for every (stat s, IV in 0..31) that reproduces the observed stat.
+    2) Sample IVs from prior_iv; for each (s, particle), draw EV uniformly from that feasible set.
+    3) Weight each particle by prior mass: log w = log P(IV) + log P(EV) under (T,W) model.
+       (No extra likelihood: feasibility already enforces the observation exactly.)
+    4) Form posteriors for IV (6x32) and EV (T row + 5 independent W histograms) from the weighted particles.
+
+    Returns
+    -------
+    (post_ev, post_iv)
+    """
+    # ----- constants / helpers -----
+    obs = _sb_to_arr(obs_stats)  # (6,)
+    Bvec = _sb_to_arr(base_stats)
+    nmult = nature_to_multipliers(nature)
+    max_ev = prior_ev.max_ev
+    max_total = prior_ev.max_total_ev
+
+    # ----- 1) feasibility mask: (6, 32, 253) -----
+    feasible_mask = np.zeros((6, 32, max_ev + 1), dtype=bool)
+    for s in range(6):
+        is_hp = (s == 0)
+        for iv_val in range(32):
+            feasible_mask[s, iv_val, :] = feasible_ev_mask_for_stat(
+                y=int(obs[s]), B=int(Bvec[s]), L=int(level),
+                n=float(nmult[s]), iv=iv_val, is_hp=is_hp
+            )
+
+    # ----- 2) sample IVs and draw EVs uniformly from feasible sets -----
+    # IV_mat: (6, M)
+    IV_mat = prior_iv.sample(M)
+
+    # Gather masks for the sampled IVs ⇒ (6, M, 253)
+    EV_mask_mat = np.empty((6, M, max_ev + 1), dtype=bool)
+    for s in range(6):
+        EV_mask_mat[s] = feasible_mask[s].take(IV_mat[s], axis=0)
+
+    # Count feasible EVs per (s, m)
+    counts = EV_mask_mat.sum(axis=2)                # (6, M)
+    valid_sm = counts > 0                           # (6, M)
+
+    # Draw uniform indices within True-positions, vectorized
+    rng = prior_ev.rng
+    u = rng.random((6, M))
+    k = np.minimum((u * np.maximum(counts, 1)).astype(int), np.maximum(counts - 1, 0))
+
+    cum = np.cumsum(EV_mask_mat, axis=2)           # (6, M, 253)
+    choice_idx = (cum > k[..., None]).argmax(axis=2)  # (6, M); returns 0 if all False
+    # mark infeasible cells explicitly
+    choice_idx = np.where(valid_sm, choice_idx, -1)    # -1 means "no feasible EV"
+
+    # If any (s,m) is infeasible, that particle column can’t produce the obs.
+    # We’ll mark columns invalid if ANY stat is infeasible.
+    col_valid = (choice_idx >= 0).all(axis=0)          # (M,)
+
+    # Build EV matrix (6, M), ints in [0..252] for valid cols; 0 elsewhere
+    EV_mat = np.where(choice_idx >= 0, choice_idx, 0)
+
+    # Optionally enforce total cap (extremely rare to exceed with per-stat feasibility,
+    # but cheap to guard). Mark columns invalid if total > max_total.
+    totals = EV_mat.sum(axis=0)
+    col_valid &= (totals <= max_total)
+
+    # If too many invalid columns, you could resample IVs for those columns here.
+    # (We skip resampling and just let their weights go to zero.)
+
+    # ----- 3) weights: log w = log P(IV) + log P(EV) -----
+    # Shapes: (M,)
+    logP_E = prior_ev.getProb(EV_mat.T, asLog=True)           # (M,)
+    logP_IV = prior_iv.getLogProb(IV_mat.T)                    # (M,)
+    logw = logP_E + logP_IV
+
+    # Any invalid columns ⇒ zero weight (−inf in log)
+    logw = np.where(col_valid, logw, -np.inf)
+
+    # normalize weights safely
+    finite = np.isfinite(logw)
+    if not np.any(finite):
+        # fallback: uniform tiny weights to avoid NaNs; prior passes through
+        w = np.full(M, 1.0 / M, dtype=float)
+    else:
+        m = np.max(logw[finite])
+        w = np.zeros(M, dtype=float)
+        w[finite] = np.exp(logw[finite] - m)
+        Z = w.sum()
+        w = w / Z if Z > 0 else np.full(M, 1.0 / M, dtype=float)
+
+    # ----- 4) re-build PMFs from weighted particles -----
+    new_ev_pmf = EV_PMF.from_samples(EV_mat.T, weights=w)
+    new_iv_pmf = IV_PMF.from_samples(IV_mat.T, weights=w)
+
+    return new_ev_pmf, new_iv_pmf
+
 # --------------------------- Single IS update (no alternating) ---------------------------
 
 def update_with_observation(

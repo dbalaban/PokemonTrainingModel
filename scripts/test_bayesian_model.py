@@ -8,7 +8,8 @@ from PMFs import EV_PMF, IV_PMF
 from bayesian_model import (
     update_with_observation,
     hybrid_ev_iv_update,
-    _predict_stats_batch,  # re-use the model's stat calculation
+    _predict_stats_batch,
+    feasible_ev_mask_for_stat
 )
 from data_structures import StatBlock, Nature, StatType
 
@@ -102,6 +103,89 @@ def compare_ev_distributions(ev_true, ev_from_pmf):
     corr_l1 = np.abs(C_true - C_pmf)[np.triu_indices(6, k=1)].mean()
     print(f"Mean abs diff of off-diag correlations: {corr_l1:.3f}")
 
+def check_feasible_masks(
+    base_stats: StatBlock,
+    level: int,
+    nature: Nature,
+    obs_stats: StatBlock,
+    *,
+    verbose: bool = True,
+    max_examples: int = 5,
+) -> bool:
+    """
+    Brute-force test of feasible_ev_mask_for_stat for each stat s and IV in 0..31.
+    For each (s, iv), we compute the 'true' feasible set by forward-evaluating
+    all EV in 0..252 and matching the observed stat. We compare that set to the
+    boolean mask returned by feasible_ev_mask_for_stat.
+
+    Returns True if all masks match exactly; otherwise prints a summary and returns False.
+    """
+    B = np.array([base_stats.hp, base_stats.atk, base_stats.def_, base_stats.spa, base_stats.spd, base_stats.spe], dtype=int)
+    obs = np.array([obs_stats.hp, obs_stats.atk, obs_stats.def_, obs_stats.spa, obs_stats.spd, obs_stats.spe], dtype=int)
+    nmult = np.array([
+        1.0,
+        nature.modifier(StatType.ATTACK),
+        nature.modifier(StatType.DEFENSE),
+        nature.modifier(StatType.SPECIAL_ATTACK),
+        nature.modifier(StatType.SPECIAL_DEFENSE),
+        nature.modifier(StatType.SPEED),
+    ], dtype=float)
+
+    ev_vals = np.arange(253, dtype=int)            # 0..252
+    all_ok = True
+    names = ['HP','Attack','Defense','Sp. Atk','Sp. Def','Speed']
+
+    for s in range(6):
+        is_hp = (s == 0)
+        # Vector pieces independent of iv for speed
+        ev4 = (ev_vals // 4)                       # (253,)
+
+        for iv in range(32):
+            if is_hp:
+                # HP: stat = ((2B + iv + floor(EV/4)) * L)//100 + L + 10
+                term = ((2 * B[s] + iv + ev4) * level) // 100
+                pred = term + level + 10
+            else:
+                # non-HP: stat = floor( ( ((2B + iv + floor(EV/4)) * L)//100 + 5 ) * n )
+                term = ((2 * B[s] + iv + ev4) * level) // 100
+                core = term + 5
+                pred = np.floor(core * nmult[s]).astype(int)
+
+            brute_mask = (pred == obs[s])          # (253,) bool
+            mask = feasible_ev_mask_for_stat(
+                y=int(obs[s]),
+                B=int(B[s]),
+                L=int(level),
+                n=float(nmult[s]),
+                iv=int(iv),
+                is_hp=is_hp,
+            )
+
+            # Compare
+            if mask.shape != brute_mask.shape:
+                if verbose:
+                    print(f"[ERROR] Mask shape mismatch for stat {names[s]}, IV={iv}: {mask.shape} vs {brute_mask.shape}")
+                all_ok = False
+                continue
+
+            diff_fp = np.where(mask & ~brute_mask)[0]    # claimed feasible but not actually feasible
+            diff_fn = np.where(~mask & brute_mask)[0]    # missed feasible EVs
+
+            if diff_fp.size or diff_fn.size:
+                all_ok = False
+                if verbose:
+                    print(f"[Mismatch] {names[s]}  IV={iv:2d} | false+={diff_fp.size:3d}, false-={diff_fn.size:3d}")
+                    if diff_fp.size:
+                        ex = ", ".join(map(str, diff_fp[:max_examples]))
+                        print(f"  examples FP (mask True, brute False): {ex}{' ...' if diff_fp.size > max_examples else ''}")
+                    if diff_fn.size:
+                        ex = ", ".join(map(str, diff_fn[:max_examples]))
+                        print(f"  examples FN (mask False, brute True): {ex}{' ...' if diff_fn.size > max_examples else ''}")
+
+    if verbose:
+        print("[Feasible-mask check] PASS" if all_ok else "[Feasible-mask check] FAIL")
+    return all_ok
+
 # -----------------------------
 # Main test
 # -----------------------------
@@ -189,6 +273,11 @@ def main():
     ev_prior_hit = [mass_near_ev(ev_marg_prior[s], int(ev_star[s]), window=1) for s in range(6)]
     print("Prior EV mass near true EV (±1) per stat:", [f"{p:.3f}" for p in ev_prior_hit])
     print(f"Mean EV mass near truth: {np.mean(ev_prior_hit):.3f}")
+    print()
+
+    # --- Feasible-mask correctness check ---
+    print("=== Feasible-mask correctness check ===")
+    _ = check_feasible_masks(base_stats=base_stats, level=level, nature=nature, obs_stats=obs_stats)
     print()
 
     # --- Test 1: Single-step importance update ---

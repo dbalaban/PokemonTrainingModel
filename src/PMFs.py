@@ -67,12 +67,57 @@ class IV_PMF:
         np.divide(self.prior, rs, out=self.prior, where=(rs > 0))
 
     def sample(self, M: int) -> np.ndarray:
-        cdf = np.cumsum(self.prior, axis=1); cdf[:, -1] = 1.0
+        cdf = np.cumsum(self.prior, axis=1)
+        cdf[:, -1] = 1.0
         u = self.rng.random((6, M))
         idx = np.empty((6, M), dtype=int)
         for s in range(6):
             idx[s] = np.searchsorted(cdf[s], u[s], side="right")
         return np.clip(idx, 0, 31)
+
+    def getProb(self, IV : ndarray): -> ndarray
+        """
+        Return P(IV) under this PMF
+        IV: Nx6 array
+        Return: N narray of total probs
+        """
+        PoIVs = self.prior[np.arange(6), np.asarray(IV, dtype=int)]
+        return np.prod(PoIVs, axis=0)
+
+    def getLogProb(self, IV: NDArray[np.integer] | NDArray[np.floating]) -> np.ndarray:
+        """
+        Return log P(IV) under the row-wise prior.
+        - IV shape: (6,) or (6, M), with entries in 0..31
+        - Output: scalar (if IV is (6,)) or (M,) for a batch.
+        Zeros in the prior produce -inf (no smoothing).
+        Out-of-range IV indices are treated as probability 0 → -inf.
+        """
+        idx = np.asarray(IV, dtype=int)
+        if idx.ndim == 1:
+            idx = idx[:, None]  # (6,1) for uniform handling
+
+        # rows index (6,1) broadcasts across columns of idx (6,M)
+        rows = np.arange(6)[:, None]
+
+        # log of prior with proper handling of zeros: log(0) -> -inf
+        with np.errstate(divide='ignore', invalid='ignore'):
+            logP = np.log(self.prior)  # (6, 32)
+
+        # mark out-of-range indices as invalid → -inf
+        invalid = (idx < 0) | (idx > 31)
+        idx_safe = np.clip(idx, 0, 31)
+
+        # gather per-row log-probs → (6, M)
+        gathered = logP[rows, idx_safe]
+
+        # force invalid selections to -inf
+        gathered = np.where(invalid, -np.inf, gathered)
+
+        # sum across the 6 stats → (M,)
+        out = gathered.sum(axis=0)
+
+        # if single vector input, return scalar
+        return out[0] if out.size == 1 else out
 
     def weighted_add_(self, iv_mat: np.ndarray, w: np.ndarray) -> None:
         out = np.zeros_like(self.prior)
@@ -86,6 +131,60 @@ class IV_PMF:
             eps = 1e-12; P = np.exp(alpha*np.log(self.P+eps)+(1-alpha)*np.log(other.P+eps))
         else: raise ValueError("mode must be linear|geometric")
         out = IV_PMF(P, rng=self.rng); out.normalize_(); return out
+
+    @staticmethod
+    def from_samples(
+        samples: "np.ndarray",
+        *,
+        weights: "np.ndarray | list[float] | None" = None,
+        rng: np.random.Generator | None = None,
+        return_hist: bool = False,
+    ) -> "IV_PMF | tuple[IV_PMF, dict[str, np.ndarray]]":
+        """
+        Build an IV_PMF from IV samples, optionally weighted.
+
+        Parameters
+        ----------
+        samples : (N,6) integer IVs in [0..31]
+        weights : optional (N,) nonnegative weights; if None, uniform
+        rng      : optional RNG to attach to the IV_PMF
+        return_hist : if True, also return {'counts': (6,32), 'weights': (N,)}
+
+        Returns
+        -------
+        IV_PMF or (IV_PMF, hist_dict)
+        """
+        IV = np.asarray(samples, dtype=int)
+        if IV.ndim != 2 or IV.shape[1] != 6:
+            raise ValueError("samples must be (N,6) integer IVs in [0..31].")
+
+        N = IV.shape[0]
+
+        # normalize weights
+        if weights is None:
+            w = np.full(N, 1.0 / max(N, 1), dtype=float)
+        else:
+            w = np.asarray(weights, dtype=float).reshape(-1)
+            if w.ndim != 1 or w.shape[0] != N:
+                raise ValueError("weights must be a vector of length N.")
+            w = np.clip(w, 0.0, np.inf)
+            s = w.sum()
+            w = (w / s) if s > 0 else np.full(N, 1.0 / max(N, 1), dtype=float)
+
+        # vectorized weighted histograms per stat
+        counts = np.zeros((6, 32), dtype=float)
+        for s_idx in range(6):
+            counts[s_idx] = np.bincount(IV[:, s_idx], weights=w, minlength=32)
+
+        # normalize rows to make a proper PMF
+        row_sums = counts.sum(axis=1, keepdims=True)
+        P = np.divide(counts, row_sums, out=np.zeros_like(counts), where=(row_sums > 0))
+
+        pmf = IV_PMF(prior=P, rng=rng)
+
+        if not return_hist:
+            return pmf
+        return pmf, {"counts": counts, "weights": w}
 
 # ========= EV PMF (stick-breaking + mandatory caps) =========
 
@@ -279,6 +378,94 @@ class EV_PMF:
         np.divide(marginals, s, out=marginals, where=(s > 0))
         return marginals
 
+    def getProb(self, EV: np.ndarray, asLog: bool = False) -> np.ndarray:
+        """
+        Return P(EV) under this EV_PMF, computed (in log-space) as:
+            log P(EV) = log P(T) + sum_{r=1..5} log P_r(S_r)
+        where T = sum(EV), W6 = EV / T (with T=0 → [0,0,0,0,0,1]),
+        S = invert_stick_breaking(W6[0:5]), and each S_r is binned to the
+        nearest of `w_bins` centers to read off row-wise probabilities in self.W.
+
+        Parameters
+        ----------
+        EV : (6,) or (N,6) array-like of integer EVs in [0, max_ev]
+        asLog : bool
+            If True, return log-probabilities. If False, return probabilities.
+
+        Returns
+        -------
+        out : scalar (if EV shape (6,)) or (N,) ndarray
+            log-probs if asLog=True, probs otherwise.
+        """
+        E = np.asarray(EV, dtype=float)
+        scalar_input = False
+        if E.ndim == 1:
+            E = E[None, :]  # (1,6)
+            scalar_input = True
+        if E.shape[1] != 6:
+            raise ValueError("EV must have shape (6,) or (N,6).")
+
+        N = E.shape[0]
+
+        # Start with -inf (log(0)) everywhere; fill in valid rows
+        log_probs = np.full(N, -np.inf, dtype=float)
+
+        # Validity checks: per-stat caps and total cap
+        per_stat_ok = (E >= 0.0) & (E <= self.max_ev + 1e-9)
+        per_row_ok = per_stat_ok.all(axis=1)
+
+        T = E.sum(axis=1).astype(int)  # totals
+        total_ok = (T >= 0) & (T <= self.max_total_ev)
+
+        valid = per_row_ok & total_ok
+        if not np.any(valid):
+            # Nothing valid: return all -inf (or zeros if asLog=False)
+            if asLog:
+                return log_probs[0] if scalar_input else log_probs
+            out = np.zeros(N, dtype=float)
+            return out[0] if scalar_input else out
+
+        # log P(T) for valid rows
+        with np.errstate(divide="ignore", invalid="ignore"):
+            logT = np.full(N, -np.inf, dtype=float)
+            logT[valid] = np.log(self.T[T[valid]])
+
+        # Map valid EV rows to W6 proportions (handle T=0 → [0,0,0,0,0,1])
+        E_sub = E[valid, :]                  # (K,6)
+        T_sub = T[valid]                     # (K,)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            W6 = np.divide(E_sub, T_sub[:, None], out=np.zeros_like(E_sub), where=(T_sub[:, None] > 0))
+        zero_tot = (T_sub == 0)
+        if np.any(zero_tot):
+            W6[zero_tot] = 0.0
+            W6[zero_tot, 5] = 1.0
+
+        # Invert stick-breaking per row to S5 in [0,1]
+        K = W6.shape[0]
+        S5 = np.empty((K, 5), dtype=float)
+        for i in range(K):
+            S5[i] = self._invert_stick_breaking(W6[i])
+
+        # Bin S5 to nearest centers in [0,1] with B bins
+        B = self.w_bins
+        idx = np.rint(S5 * (B - 1)).astype(int)
+        np.clip(idx, 0, B - 1, out=idx)  # (K,5)
+
+        # Sum row-wise log-probs: sum_r log W[r, idx_r]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            row_log = np.sum(np.log(np.clip(W_rows, 1e-300, 1.0)), axis=0)  # (K,)
+            row_log[any_zero] = -np.inf
+
+        # Combine for valid rows
+        log_probs[valid] = logT[valid] + row_log
+
+        if asLog:
+            return log_probs[0] if scalar_input else log_probs
+
+        # Convert back to probability space; exp(-inf) -> 0
+        probs = np.exp(log_probs)
+        return probs[0] if scalar_input else probs
+
     # deterministic mapping (kept for tests)
     @staticmethod
     def _ev_from_W6_and_T(W6_col: np.ndarray, T: int, U: int = 252) -> np.ndarray:
@@ -290,40 +477,84 @@ class EV_PMF:
 
     @staticmethod
     def from_samples(
-        samples: "np.ndarray | List[StatBlock]",
+        samples: "np.ndarray | list[StatBlock]",
         w_bins: int = 506,
         *,
         return_coords: bool = False,
         rng: np.random.Generator | None = None,
         allocator: str = "round",
-    ) -> "EV_PMF | Tuple[EV_PMF, Dict[str, np.ndarray]]":
+        weights: "np.ndarray | list[float] | None" = None,
+    ) -> "EV_PMF | tuple[EV_PMF, dict[str, np.ndarray]]":
+        """
+        Build an EV_PMF from EV samples, optionally weighted.
+
+        Parameters
+        ----------
+        samples : (N,6) integer EVs or list[StatBlock]
+        w_bins  : number of bins for each of the 5 stick-breaking rows
+        return_coords : also return {'totals','W6','S5'} if True
+        rng, allocator : forwarded to EV_PMF constructor
+        weights : optional (N,) nonnegative weights; if None, uniform
+
+        Returns
+        -------
+        pmf or (pmf, coords)
+        """
+        # --- coerce samples to (N,6) float array ---
         if isinstance(samples, list):
-            ev_array = np.array([[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in samples], dtype=float)
+            ev_array = np.array(
+                [[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in samples],
+                dtype=float
+            )
         else:
             ev_array = np.asarray(samples, dtype=float)
             if ev_array.ndim != 2 or ev_array.shape[1] != 6:
                 raise ValueError("samples must be (N,6) EV values or a list[StatBlock].")
 
-        N = ev_array.shape[0]; max_ev = 252; max_total_ev = 2 * max_ev + 6
+        N = ev_array.shape[0]
+        # --- coerce/normalize weights ---
+        if weights is None:
+            w = np.full(N, 1.0 / max(N, 1), dtype=float)
+        else:
+            w = np.asarray(weights, dtype=float).reshape(-1)
+            if w.ndim != 1 or w.shape[0] != N:
+                raise ValueError("weights must be a vector of length N.")
+            w = np.clip(w, 0.0, np.inf)
+            s = w.sum()
+            w = (w / s) if s > 0 else np.full(N, 1.0 / max(N, 1), dtype=float)
+
+        max_ev = 252
+        max_total_ev = 2 * max_ev + 6  # 510
+
+        # --- 1) Weighted PMF over totals T ---
         totals = ev_array.sum(axis=1).astype(int)
         totals = np.clip(totals, 0, max_total_ev)
-        T_hist = np.bincount(totals, minlength=max_total_ev + 1).astype(float)
-        T_hist /= max(T_hist.sum(), 1e-12)
+        T_hist = np.bincount(totals, weights=w, minlength=max_total_ev + 1).astype(float)
+        Ts = T_hist.sum()
+        T_hist = (T_hist / Ts) if Ts > 0 else np.full(max_total_ev + 1, 1.0 / (max_total_ev + 1))
 
+        # --- 2) Weighted stick-breaking rows via sample proportions ---
         with np.errstate(divide="ignore", invalid="ignore"):
             W6 = np.divide(ev_array, totals[:, None], out=np.zeros_like(ev_array), where=(totals[:, None] > 0))
         zero_tot = (totals == 0)
         if np.any(zero_tot):
-            W6[zero_tot] = 0.0; W6[zero_tot, 5] = 1.0
+            W6[zero_tot] = 0.0
+            W6[zero_tot, 5] = 1.0
 
+        # invert stick-breaking per sample → S5 in [0,1]
         S5 = np.empty((N, 5), dtype=float)
-        for i in range(N): S5[i] = EV_PMF._invert_stick_breaking(W6[i])
+        for i in range(N):
+            S5[i] = EV_PMF._invert_stick_breaking(W6[i])
 
+        # bin S5 with weights
         B = w_bins
-        idx = np.rint(S5 * (B - 1)).astype(int); np.clip(idx, 0, B - 1, out=idx)
+        idx = np.rint(S5 * (B - 1)).astype(int)
+        np.clip(idx, 0, B - 1, out=idx)
+
         W_counts = np.zeros((5, B), dtype=float)
         for r in range(5):
-            W_counts[r] = np.bincount(idx[:, r], minlength=B)
+            W_counts[r] = np.bincount(idx[:, r], weights=w, minlength=B)
+
         row_sums = W_counts.sum(axis=1, keepdims=True)
         W_hist = np.divide(W_counts, row_sums, out=np.zeros_like(W_counts), where=(row_sums > 0))
 
