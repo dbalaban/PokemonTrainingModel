@@ -330,8 +330,24 @@ class EV_PMF:
                 self.histograms = np.divide(self.histograms, row_sums, 
                                            out=self.histograms, where=(row_sums > 0))
             else:
-                # Uniform histograms
-                self.histograms = np.full((6, self.MAX_EV + 1), 1.0 / (self.MAX_EV + 1), dtype=float)
+                # Check if priorT is provided and represents a delta distribution
+                if priorT is not None:
+                    # Find where the mass is concentrated
+                    max_idx = int(np.argmax(priorT))
+                    max_val = float(priorT[max_idx])
+                    
+                    # If priorT is a delta (>99% mass at one point), create delta histograms
+                    if max_val > 0.99 and max_idx == 0:
+                        # Delta at T=0: all EVs are 0
+                        self.histograms = np.zeros((6, self.MAX_EV + 1), dtype=float)
+                        self.histograms[:, 0] = 1.0  # All mass at EV=0 for each stat
+                    else:
+                        # For other priorT distributions, default to uniform histograms
+                        # (histogram mode cannot directly represent arbitrary T distributions)
+                        self.histograms = np.full((6, self.MAX_EV + 1), 1.0 / (self.MAX_EV + 1), dtype=float)
+                else:
+                    # No priorT provided: default to uniform histograms
+                    self.histograms = np.full((6, self.MAX_EV + 1), 1.0 / (self.MAX_EV + 1), dtype=float)
             
             # These are not used in histogram mode, but keep them for compatibility
             self.T = None
