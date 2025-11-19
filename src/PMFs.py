@@ -289,13 +289,24 @@ class EV_PMF:
         rng: np.random.Generator | None = None,
         *,
         allocator: str = "round",   # 'multinomial' | 'round'
-        mode: str = "histogram",   # 'dirichlet' | 'histogram'
+        mode: str | None = None,   # 'dirichlet' | 'histogram' | None (auto-detect)
         histograms: np.ndarray | None = None,  # (6, MAX_EV+1) for histogram mode
     ):
         self.n_stats = 6
         self.max_total_ev = 2 * self.MAX_EV + self.n_stats  # 510
         self.rng = rng if rng is not None else np.random.default_rng()
         self.allocator = allocator
+        
+        # Auto-detect mode if not specified
+        if mode is None:
+            if histograms is not None:
+                mode = 'histogram'
+            elif priorT is not None or alpha is not None:
+                mode = 'dirichlet'
+            else:
+                # Default to dirichlet for backward compatibility
+                mode = 'dirichlet'
+        
         self.mode = mode.lower()
         
         if self.mode not in ['dirichlet', 'histogram']:
@@ -599,9 +610,12 @@ class EV_PMF:
 
     def getProb(self, EV: np.ndarray, asLog: bool = False) -> np.ndarray:
         """
-        Return P(EV) under this EV_PMF, computed (in log-space) as:
-            log P(EV) = log P(T) + log Dirichlet_pmf(W6 | alpha)
-        where T = sum(EV), W6 = EV / T (with T=0 → [1/6, 1/6, 1/6, 1/6, 1/6, 1/6])
+        Return P(EV) under this EV_PMF.
+        
+        Mode-specific behavior:
+          - Dirichlet mode: log P(EV) = log P(T) + log Dirichlet_pmf(W6 | alpha)
+            where T = sum(EV), W6 = EV / T (with T=0 → [1/6, 1/6, 1/6, 1/6, 1/6, 1/6])
+          - Histogram mode: log P(EV) = sum_i log P(EV_i) from independent histograms
 
         Parameters
         ----------
@@ -650,56 +664,93 @@ class EV_PMF:
             out = np.zeros(N, dtype=float)
             return out[0] if scalar_input else out
 
-        # log P(T) for valid rows
-        with np.errstate(divide="ignore", invalid="ignore"):
-            logT = np.full(N, -np.inf, dtype=float)
-            logT[valid] = np.log(self.T[T[valid]])
+        # Mode-specific probability calculation
+        if self.mode == 'dirichlet':
+            # ---- Dirichlet mode: P(T) * Dirichlet(W6 | alpha) ----
+            
+            # log P(T) for valid rows
+            with np.errstate(divide="ignore", invalid="ignore"):
+                logT = np.full(N, -np.inf, dtype=float)
+                logT[valid] = np.log(self.T[T[valid]])
 
-        # Map valid EV rows to W6 proportions (handle T=0 → uniform)
-        E_sub = E[valid, :]                  # (K,6)
-        T_sub = T[valid]                     # (K,)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            W6 = np.divide(E_sub, T_sub[:, None], out=np.zeros_like(E_sub), where=(T_sub[:, None] > 0))
-        zero_tot = (T_sub == 0)
-        if np.any(zero_tot):
-            W6[zero_tot] = 1.0 / 6.0  # Uniform for T=0
+            # Map valid EV rows to W6 proportions (handle T=0 → uniform)
+            E_sub = E[valid, :]                  # (K,6)
+            T_sub = T[valid]                     # (K,)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                W6 = np.divide(E_sub, T_sub[:, None], out=np.zeros_like(E_sub), where=(T_sub[:, None] > 0))
+            zero_tot = (T_sub == 0)
+            if np.any(zero_tot):
+                W6[zero_tot] = 1.0 / 6.0  # Uniform for T=0
 
-        # Dirichlet log-density: log Dir(w | alpha) = log Gamma(sum alpha) - sum log Gamma(alpha_i) + sum (alpha_i - 1) log w_i
-        # However, for discrete EVs, we need to integrate over a small region around W6
-        # For simplicity, we'll use a point-mass approximation at the exact proportions
-        K = W6.shape[0]
-        
-        # Dirichlet PDF at W6
-        # log Dir(w | alpha) = log Gamma(alpha_0) - sum log Gamma(alpha_i) + sum (alpha_i - 1) log w_i
-        # where alpha_0 = sum(alpha)
-        alpha_sum = self.alpha.sum()
-        log_norm = gammaln(alpha_sum) - gammaln(self.alpha).sum()
-        
-        # sum (alpha_i - 1) log w_i for each sample
-        # Handle zeros in W6 properly
-        with np.errstate(divide="ignore", invalid="ignore"):
-            log_w6 = np.log(np.clip(W6, 1e-300, 1.0))  # (K, 6)
-        
-        # For each row, compute sum (alpha_i - 1) * log(w_i)
-        alpha_minus_1 = self.alpha - 1.0  # (6,)
-        log_dir = np.sum(alpha_minus_1[None, :] * log_w6, axis=1)  # (K,)
-        log_dir += log_norm
-        
-        # Handle cases where W6 has zeros (should only happen if alpha_i >= 1 for all i)
-        # If alpha_i < 1 and w_i = 0, density is infinite (but we clipped to avoid -inf)
-        # If alpha_i = 1 (uniform), w_i = 0 is density 0
-        # If alpha_i > 1, w_i = 0 is density 0
-        
-        # For zero-total cases, use uniform Dirichlet
-        if np.any(zero_tot):
-            uniform_alpha = np.ones(6)
-            alpha_sum_uniform = 6.0
-            log_norm_uniform = gammaln(alpha_sum_uniform) - gammaln(uniform_alpha).sum()
-            alpha_minus_1_uniform = uniform_alpha - 1.0
-            log_dir[zero_tot] = log_norm_uniform  # All w_i = 1/6, so log(1/6) * 0 = 0
+            # Dirichlet log-density: log Dir(w | alpha) = log Gamma(sum alpha) - sum log Gamma(alpha_i) + sum (alpha_i - 1) log w_i
+            # However, for discrete EVs, we need to integrate over a small region around W6
+            # For simplicity, we'll use a point-mass approximation at the exact proportions
+            K = W6.shape[0]
+            
+            # Dirichlet PDF at W6
+            # log Dir(w | alpha) = log Gamma(alpha_0) - sum log Gamma(alpha_i) + sum (alpha_i - 1) log w_i
+            # where alpha_0 = sum(alpha)
+            alpha_sum = self.alpha.sum()
+            log_norm = gammaln(alpha_sum) - gammaln(self.alpha).sum()
+            
+            # sum (alpha_i - 1) log w_i for each sample
+            # Handle zeros in W6 properly
+            with np.errstate(divide="ignore", invalid="ignore"):
+                log_w6 = np.log(np.clip(W6, 1e-300, 1.0))  # (K, 6)
+            
+            # For each row, compute sum (alpha_i - 1) * log(w_i)
+            alpha_minus_1 = self.alpha - 1.0  # (6,)
+            log_dir = np.sum(alpha_minus_1[None, :] * log_w6, axis=1)  # (K,)
+            log_dir += log_norm
+            
+            # Handle cases where W6 has zeros (should only happen if alpha_i >= 1 for all i)
+            # If alpha_i < 1 and w_i = 0, density is infinite (but we clipped to avoid -inf)
+            # If alpha_i = 1 (uniform), w_i = 0 is density 0
+            # If alpha_i > 1, w_i = 0 is density 0
+            
+            # For zero-total cases, use uniform Dirichlet
+            if np.any(zero_tot):
+                uniform_alpha = np.ones(6)
+                alpha_sum_uniform = 6.0
+                log_norm_uniform = gammaln(alpha_sum_uniform) - gammaln(uniform_alpha).sum()
+                alpha_minus_1_uniform = uniform_alpha - 1.0
+                log_dir[zero_tot] = log_norm_uniform  # All w_i = 1/6, so log(1/6) * 0 = 0
 
-        # Combine for valid rows
-        log_probs[valid] = logT[valid] + log_dir
+            # Combine for valid rows
+            log_probs[valid] = logT[valid] + log_dir
+        
+        elif self.mode == 'histogram':
+            # ---- Histogram mode: product of independent probabilities ----
+            
+            # For each valid row, compute product of P(EV_i) across stats
+            # In log space: log P(EV) = sum_i log P(EV_i)
+            E_int = E.astype(int)  # Convert to integer indices
+            
+            for i in range(N):
+                if not valid[i]:
+                    continue
+                
+                log_prob_i = 0.0
+                for s in range(6):
+                    ev_val = E_int[i, s]
+                    # Ensure within bounds
+                    if 0 <= ev_val <= self.max_ev:
+                        prob_s = self.histograms[s, ev_val]
+                        if prob_s > 0:
+                            log_prob_i += np.log(prob_s)
+                        else:
+                            # Zero probability for this stat value
+                            log_prob_i = -np.inf
+                            break
+                    else:
+                        # Out of bounds
+                        log_prob_i = -np.inf
+                        break
+                
+                log_probs[i] = log_prob_i
+        
+        else:
+            raise ValueError(f"Unknown EV_PMF mode: {self.mode}")
 
         if asLog:
             return log_probs[0] if scalar_input else log_probs
