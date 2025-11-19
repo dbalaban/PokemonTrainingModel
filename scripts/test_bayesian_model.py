@@ -1,4 +1,7 @@
 # scripts/test_bayes.py
+import sys
+sys.path.insert(0, '../src')
+
 import numpy as np
 from typing import Tuple
 from scipy.stats import entropy, wasserstein_distance
