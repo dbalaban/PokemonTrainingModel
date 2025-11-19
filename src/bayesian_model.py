@@ -477,6 +477,8 @@ def analytic_update_with_observation(
 
     total_valid = 0
     total_attempts = 0
+    consecutive_zero_batches = 0
+    early_stop_threshold = 50  # Stop if 50 consecutive batches yield 0 valid samples
 
     for b in range(max_batches):
         IV_batch, EV_batch, logw_batch, col_valid_batch = analytic_update_sample_batch(
@@ -506,8 +508,18 @@ def analytic_update_with_observation(
             EV_list.append(EV_batch[:, valid_idx])
             logw_list.append(logw_batch[valid_idx])
             total_valid += n_valid
+            consecutive_zero_batches = 0  # Reset counter
+        else:
+            consecutive_zero_batches += 1
 
+        # Early stopping conditions
         if total_valid >= M:
+            break
+        
+        # Stop early if we've had too many consecutive zero batches
+        if consecutive_zero_batches >= early_stop_threshold:
+            if verbose:
+                print(f"Stopping early: {consecutive_zero_batches} consecutive batches with 0 valid samples.")
             break
 
     if total_valid == 0:
