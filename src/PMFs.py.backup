@@ -209,49 +209,15 @@ class IV_PMF:
 
 # ========= EV PMF (Dirichlet-Multinomial + mandatory caps) =========
 
-
-# ========= EV PMF - Wrapper Pattern =========
-#
-# EV_PMF is a wrapper class that delegates to either:
-#   - EV_PMF_Dirichlet: Uses Dirichlet + total EV distribution (default)
-#   - EV_PMF_Simple: Uses independent histograms per stat
-#
-# The wrapper maintains backward compatibility while allowing
-# flexible backend implementations.
-#
-
-
-# ======================================================================
-# EV PMF Class Hierarchy
-# ======================================================================
-#
-# This module implements EV (Effort Value) probability mass functions
-# using a wrapper pattern for flexibility:
-#
-# - EV_PMF_Dirichlet: Dirichlet + total EV model (preserves correlations)
-# - EV_PMF_Simple: Independent histograms (preserves empirical shape)
-# - EV_PMF: Wrapper class that delegates to one of the above
-#
-# Usage:
-#   pmf = EV_PMF.from_samples(samples, mode="dirichlet")  # or "histogram"
-#   samples = pmf.sample(1000)
-#
-# The wrapper pattern allows:
-# - Clean separation of concerns
-# - Easy addition of new implementations
-# - Backward compatibility with existing code
-#
-
 class EV_PMF:
     """
-    Wrapper class for EV probability mass functions.
-    
-    Delegates to either EV_PMF_Dirichlet or EV_PMF_Simple based on mode parameter.
-    Maintains backward compatibility with existing code.
-    
-    Modes:
-      - "dirichlet" (default): Dirichlet + total EV model, preserves correlations
-      - "histogram": Independent histograms, better preserves empirical distributions
+    EV distribution parameterized by:
+      - T: PMF over total EVs (0..510)
+      - alpha: Dirichlet concentration parameters (6,) for the 6 stats
+
+    Allocator:
+      - 'multinomial' : draws EV via capped multinomial with iterative repair (sum=T, each ≤ 252)
+      - 'round'       : deterministic proportional rounding with caps (vectorized)
     """
 
     # Class-level constant for per-stat EV cap (shared by all instances)
@@ -764,86 +730,3 @@ class EV_PMF:
             if not return_coords:
                 return pmf
             return pmf, {"totals": totals, "W6": W6, "alpha": alpha}
-
-
-# ============================================================================
-# Explicit Implementation Classes (for clean architecture)
-# ============================================================================
-
-class EV_PMF_Dirichlet(EV_PMF):
-    """
-    Dirichlet-based EV PMF implementation.
-    
-    Uses a Dirichlet distribution over EV proportions combined with
-    a discrete distribution over total EVs. This preserves correlations
-    between stats but may narrow empirical distributions during fitting.
-    
-    Parameters
-    ----------
-    priorT : np.ndarray, shape (511,)
-        PMF over total EV values (0..510)
-    alpha : np.ndarray, shape (6,)
-        Dirichlet concentration parameters for the 6 stats
-    rng : np.random.Generator, optional
-        Random number generator
-    allocator : str, optional
-        'multinomial' or 'round' (default: 'round')
-    """
-    
-    def __init__(
-        self,
-        priorT: np.ndarray | None = None,
-        alpha: np.ndarray | None = None,
-        rng: np.random.Generator | None = None,
-        *,
-        allocator: str = "round",
-    ):
-        # Call parent with mode='dirichlet'
-        super().__init__(
-            priorT=priorT,
-            alpha=alpha,
-            rng=rng,
-            allocator=allocator,
-            mode='dirichlet'
-        )
-
-
-class EV_PMF_Simple(EV_PMF):
-    """
-    Histogram-based EV PMF implementation (also called "simple" mode).
-    
-    Uses independent histograms for each stat. Better preserves empirical
-    distribution shapes but requires rejection sampling to enforce the
-    total EV ≤ 510 constraint.
-    
-    Variance preservation: ~98% (vs ~62% for Dirichlet)
-    
-    Parameters
-    ----------
-    histograms : np.ndarray, shape (6, 253)
-        Independent PMFs for each stat (6 stats × 253 possible EV values)
-    rng : np.random.Generator, optional
-        Random number generator
-    """
-    
-    def __init__(
-        self,
-        histograms: np.ndarray | None = None,
-        rng: np.random.Generator | None = None,
-    ):
-        # Call parent with mode='histogram'
-        super().__init__(
-            rng=rng,
-            mode='histogram',
-            histograms=histograms
-        )
-
-
-# Note: EV_PMF already acts as a wrapper via its mode parameter.
-# EV_PMF_Dirichlet and EV_PMF_Simple are convenience subclasses that
-# explicitly select the mode, providing clearer semantics:
-#
-#   pmf = EV_PMF_Dirichlet(...)  # Explicit: uses Dirichlet model
-#   pmf = EV_PMF_Simple(...)      # Explicit: uses histogram model
-#   pmf = EV_PMF(..., mode='dirichlet')  # Generic: mode-based
-#
