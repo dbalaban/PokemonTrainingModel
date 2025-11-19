@@ -224,7 +224,17 @@ def hybrid_ev_iv_update(
     Hybrid alternating update (no corners):
       1) IV update by exact inversion + weighting with current EV marginals.
       2) EV update by importance sampling constrained by current IV posterior.
+    
+    Note: This method currently only supports EV_PMF in 'dirichlet' mode.
+    For 'histogram' mode, use 'analytic' update method instead.
     """
+    # Check mode compatibility
+    if prior_ev.mode != 'dirichlet':
+        raise ValueError(
+            f"hybrid_ev_iv_update only supports EV_PMF in 'dirichlet' mode. "
+            f"Current mode: '{prior_ev.mode}'. "
+            f"Consider using 'analytic' update method instead."
+        )
     ev_post = prior_ev
     iv_post = IV_PMF(prior=prior_iv.P, rng=prior_ev.rng)
 
@@ -435,6 +445,9 @@ def analytic_update_with_observation(
     """
     One-shot update using IV-only sampling + analytic EV feasibility,
     with batched importance sampling and proper correction for q(IV,EV).
+    
+    Mode compatibility: This method supports both 'dirichlet' and 'histogram' modes.
+    The returned EV_PMF will preserve the mode of the input prior_ev.
 
     Interpretation of M
     -------------------
@@ -608,8 +621,9 @@ def analytic_update_with_observation(
 
     # ----- 5) re-build PMFs from weighted particles -----
     # EV_all.T and IV_all.T are (N_valid, 6)
-    new_ev_pmf = EV_PMF.from_samples(EV_all.T, weights=w)
-    new_iv_pmf = IV_PMF.from_samples(IV_all.T, weights=w)
+    # Preserve the mode of the input prior
+    new_ev_pmf = EV_PMF.from_samples(EV_all.T, weights=w, mode=prior_ev.mode, rng=prior_ev.rng)
+    new_iv_pmf = IV_PMF.from_samples(IV_all.T, weights=w, rng=prior_ev.rng)
 
     return new_ev_pmf, new_iv_pmf
 
@@ -629,7 +643,17 @@ def update_with_observation(
     """
     One-shot importance update with proposal q(EV,IV) = prior_ev × prior_iv.
     Uses Dirichlet-Multinomial sampling.
+    
+    Note: This method currently only supports EV_PMF in 'dirichlet' mode.
+    For 'histogram' mode, use 'analytic' update method instead.
     """
+    # Check mode compatibility
+    if prior_ev.mode != 'dirichlet':
+        raise ValueError(
+            f"update_with_observation only supports EV_PMF in 'dirichlet' mode. "
+            f"Current mode: '{prior_ev.mode}'. "
+            f"Consider using 'analytic' update method instead."
+        )
     obs = _sb_to_arr(obs_stats)
 
     # ----- sample EV from prior_ev via Dirichlet-Multinomial -----

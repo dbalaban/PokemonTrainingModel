@@ -80,7 +80,23 @@ class RegimenSimulator:
             self.samples.append(ev_gains)
         return self.samples
 
-    def toPMF(self, allocator="multinomial") -> EV_PMF:
+    def toPMF(self, allocator="multinomial", mode="dirichlet") -> EV_PMF:
+        """
+        Convert simulation samples to an EV_PMF.
+        
+        Parameters
+        ----------
+        allocator : str
+            Allocation method for dirichlet mode: "multinomial" or "round"
+        mode : str
+            PMF mode: "dirichlet" or "histogram" (default: "dirichlet")
+            Should match the mode of the prior EV_PMF for compatibility
+        
+        Returns
+        -------
+        EV_PMF
+            EV distribution estimated from samples
+        """
         if len(self.samples) == 0:
             raise ValueError("No samples available. Run simulation first.")
 
@@ -90,7 +106,7 @@ class RegimenSimulator:
             dtype=float
         )
         
-        return EV_PMF.from_samples(ev_array, allocator=allocator)
+        return EV_PMF.from_samples(ev_array, allocator=allocator, mode=mode)
 
     def plot_ev_distributions(self):
         ev_array = np.array([[s.hp, s.atk, s.def_, s.spa, s.spd, s.spe] for s in self.samples])

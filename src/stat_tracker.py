@@ -642,8 +642,8 @@ def track_training_stats(
         num_trials = M
         simulator.run_simulation(num_trials=num_trials, exp_start=species_info.exp_to_level(regimen_start_level))
         
-        # Convert samples to EV_PMF
-        post_ev_sim = simulator.toPMF(allocator="round")
+        # Convert samples to EV_PMF (match mode of current EV PMF)
+        post_ev_sim = simulator.toPMF(allocator="round", mode=current_ev_pmf.mode)
         
         # Verbose: Show EV statistics before and after combining
         if verbose:
