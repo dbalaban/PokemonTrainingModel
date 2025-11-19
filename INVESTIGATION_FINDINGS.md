@@ -106,26 +106,33 @@ If the observations are correct, the training regimen may be incomplete. Verify:
 
 **Action**: Review the full training history and add any missing EV sources.
 
-### Option 3: Use Tolerance-Based Updates
+### Option 3: Use Robust Update Methods with Smoothing (Implemented)
 
-For minor inconsistencies, we can relax the exact-match requirement:
+For handling minor to moderate inconsistencies, use the hybrid or simple update methods with smoothing:
 
-```python
-# Add tolerance parameter to allow near-matches
-ev_pmf, iv_pmf = update_with_observation(
-    prior_ev=ev_prior,
-    prior_iv=iv_prior,
-    obs_stats=obs_stats,
-    level=level,
-    base_stats=base_stats,
-    nature=nature,
-    M=M,
-    tol=2,  # Allow ±2 stat point tolerance
-    verbose=True,
-)
+```bash
+# Hybrid method with moderate smoothing (RECOMMENDED FOR ROBUSTNESS)
+python run_regimen.py --M 5000 \
+    --update-method hybrid \
+    --smoothing-alpha 0.3 \
+    --smoothing-T 0.3
+
+# Simple method with high smoothing (MOST ROBUST)
+python run_regimen.py --M 5000 \
+    --update-method simple \
+    --smoothing-alpha 0.5 \
+    --smoothing-T 0.5
 ```
 
-**Limitation**: This only helps with small discrepancies (1-2 stat points), not the large differences observed here.
+**Advantages**:
+- Completes successfully even with data inconsistencies
+- Provides reasonable posterior distributions
+- Can handle measurement noise and minor recording errors
+
+**Limitations**:
+- Results will be biased if the data inconsistency is large
+- Final EV estimates may not match the true training regimen
+- Should still investigate and fix the underlying data issue
 
 ### Option 4: Separate Update Tracking
 
