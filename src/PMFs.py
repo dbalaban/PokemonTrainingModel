@@ -330,9 +330,41 @@ class EV_PMF:
                 self.histograms = np.divide(self.histograms, row_sums, 
                                            out=self.histograms, where=(row_sums > 0))
             else:
-                # Check if priorT is provided and represents a delta distribution
-                if priorT is not None:
-                    # Find where the mass is concentrated
+                # Check if both priorT and alpha are provided for Gaussian initialization
+                if priorT is not None and alpha is not None:
+                    # Calculate expected total EV from priorT
+                    T_values = np.arange(len(priorT))
+                    expected_T = float(np.dot(T_values, priorT))
+                    
+                    # Calculate means for each stat based on alpha proportions
+                    alpha_sum = float(np.sum(alpha))
+                    if alpha_sum > 0:
+                        stat_means = (alpha / alpha_sum) * expected_T
+                    else:
+                        stat_means = np.zeros(6)
+                    
+                    # Initialize histograms with Gaussian distributions
+                    self.histograms = np.zeros((6, self.MAX_EV + 1), dtype=float)
+                    ev_values = np.arange(self.MAX_EV + 1)
+                    
+                    for s in range(6):
+                        mean = stat_means[s]
+                        if mean > 0:
+                            # Standard deviation is half the mean
+                            std = mean / 2.0
+                            # Gaussian PDF
+                            self.histograms[s] = np.exp(-0.5 * ((ev_values - mean) / std) ** 2)
+                        else:
+                            # If mean is 0, create delta at 0
+                            self.histograms[s, 0] = 1.0
+                    
+                    # Normalize each histogram
+                    row_sums = self.histograms.sum(axis=1, keepdims=True)
+                    self.histograms = np.divide(self.histograms, row_sums, 
+                                               out=self.histograms, where=(row_sums > 0))
+                    
+                elif priorT is not None:
+                    # Only priorT provided: check if it's a delta distribution
                     max_idx = int(np.argmax(priorT))
                     max_val = float(priorT[max_idx])
                     
