@@ -154,6 +154,13 @@ def main():
                         help='Enable verbose output')
     parser.add_argument('--debug-plots', action='store_true',
                         help='Generate matplotlib plots of marginals after each observation')
+    parser.add_argument('--smoothing-alpha', type=float, default=0.0,
+                        help='EV PMF alpha smoothing parameter (0.0=no smoothing, 0.5=moderate, 1.0=full) (default: 0.0)')
+    parser.add_argument('--smoothing-T', type=float, default=0.0,
+                        help='EV PMF total smoothing parameter (0.0=no smoothing, 0.5=moderate, 1.0=full) (default: 0.0)')
+    parser.add_argument('--update-method', type=str, default='analytic',
+                        choices=['analytic', 'hybrid', 'simple'],
+                        help='Update method to use (default: analytic)')
     args = parser.parse_args()
 
     # Define observed stats at levels 12, 19, 20
@@ -189,6 +196,9 @@ def main():
     print(f"\nMonte Carlo particles: {args.M}")
     print(f"Verbose mode: {args.verbose}")
     print(f"Debug plots: {args.debug_plots}")
+    print(f"Smoothing alpha: {args.smoothing_alpha}")
+    print(f"Smoothing T: {args.smoothing_T}")
+    print(f"Update method: {args.update_method}")
 
     # Run the tracker
     final_ev_pmf, final_iv_pmf = track_training_stats(
@@ -201,6 +211,9 @@ def main():
         M=args.M,
         verbose=args.verbose,
         debug_plots=args.debug_plots,
+        smoothing_alpha=args.smoothing_alpha,
+        smoothing_T=args.smoothing_T,
+        update_method=args.update_method,
     )
 
     print("\n" + "="*70)
