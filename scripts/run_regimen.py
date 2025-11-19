@@ -161,6 +161,9 @@ def main():
     parser.add_argument('--update-method', type=str, default='analytic',
                         choices=['analytic', 'hybrid', 'simple'],
                         help='Update method to use (default: analytic). Note: analytic may hang with data inconsistencies; use hybrid with smoothing for robustness.')
+    parser.add_argument('--ev-mode', type=str, default='dirichlet',
+                        choices=['dirichlet', 'histogram'],
+                        help='EV PMF mode (default: dirichlet). Note: histogram mode only works with analytic update method.')
     args = parser.parse_args()
 
     # Define observed stats at levels 12, 19, 20
@@ -199,6 +202,7 @@ def main():
     print(f"Smoothing alpha: {args.smoothing_alpha}")
     print(f"Smoothing T: {args.smoothing_T}")
     print(f"Update method: {args.update_method}")
+    print(f"EV mode: {args.ev_mode}")
 
     # Run the tracker
     final_ev_pmf, final_iv_pmf = track_training_stats(
@@ -214,6 +218,7 @@ def main():
         smoothing_alpha=args.smoothing_alpha,
         smoothing_T=args.smoothing_T,
         update_method=args.update_method,
+        ev_mode=args.ev_mode,
     )
 
     print("\n" + "="*70)

@@ -471,6 +471,7 @@ def track_training_stats(
     smoothing_alpha: float = 0.0,
     smoothing_T: float = 0.0,
     update_method: str = 'analytic',
+    ev_mode: str = 'dirichlet',
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
     Track Pokemon stats through a training regimen with observations.
@@ -510,6 +511,11 @@ def track_training_stats(
         EV PMF total smoothing parameter (0.0=no smoothing, 1.0=full) (default: 0.0)
     update_method : str
         Update method to use: 'analytic', 'hybrid', or 'simple' (default: 'analytic')
+        Note: 'hybrid' and 'simple' only support 'dirichlet' mode
+    ev_mode : str
+        EV_PMF mode: 'dirichlet' or 'histogram' (default: 'dirichlet')
+        - 'dirichlet': Dirichlet + total EV model (preserves correlations)
+        - 'histogram': Independent histograms (better preserves distribution shapes)
         
     Returns
     -------
@@ -520,7 +526,14 @@ def track_training_stats(
     ------
     ValueError
         If observation levels are outside the regimen's level range or not strictly increasing
+        If update_method is incompatible with ev_mode
     """
+    # Validate mode compatibility with update method
+    if ev_mode == 'histogram' and update_method in ['hybrid', 'simple']:
+        raise ValueError(
+            f"Update method '{update_method}' only supports 'dirichlet' mode. "
+            f"For 'histogram' mode, use 'analytic' update method."
+        )
     # 1. Sort observations by level
     sorted_obs = sorted(observations, key=lambda obs: obs.level)
     
@@ -563,21 +576,29 @@ def track_training_stats(
     # IV prior: uniform over all 6 stats and 32 IV values
     iv_prior = IV_PMF(prior=None)  # None means uniform
     
-    # EV prior: no training yet (P(T=0) = 1)
-    # Create a delta distribution at T=0
-    max_total_ev = 510
-    priorT = np.zeros(max_total_ev + 1, dtype=float)
-    priorT[0] = 1.0  # All mass at T=0
-    
-    # For T=0, any alpha is consistent (use uniform Dirichlet)
-    alpha = np.ones(6, dtype=float)
-    
-    ev_prior = EV_PMF(priorT=priorT, alpha=alpha)
+    # EV prior: no training yet (all EVs at 0)
+    if ev_mode == 'dirichlet':
+        # Dirichlet mode: P(T=0) = 1
+        max_total_ev = 510
+        priorT = np.zeros(max_total_ev + 1, dtype=float)
+        priorT[0] = 1.0  # All mass at T=0
+        
+        # For T=0, any alpha is consistent (use uniform Dirichlet)
+        alpha = np.ones(6, dtype=float)
+        
+        ev_prior = EV_PMF(priorT=priorT, alpha=alpha, mode='dirichlet')
+    else:  # histogram mode
+        # Histogram mode: all histograms have mass at EV=0
+        max_ev = 252
+        histograms = np.zeros((6, max_ev + 1), dtype=float)
+        histograms[:, 0] = 1.0  # All mass at EV=0 for each stat
+        
+        ev_prior = EV_PMF(mode='histogram', histograms=histograms)
     
     if verbose:
         print("\nInitialized priors:")
         print("  IV: uniform distribution over [0, 31] for each stat")
-        print("  EV: delta at zero (no training yet)")
+        print(f"  EV: delta at zero (no training yet), mode={ev_mode}")
     
     # 5. Create a mapping from level to observations
     obs_by_level = {}
