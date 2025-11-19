@@ -587,6 +587,33 @@ def track_training_stats(
         # Convert samples to EV_PMF
         post_ev_sim = simulator.toPMF(allocator="round")
         
+        # Verbose: Show EV statistics before and after combining
+        if verbose:
+            stat_names = ['HP', 'Attack', 'Defense', 'Sp. Attack', 'Sp. Defense', 'Speed']
+            
+            # Get marginals for current EV PMF (before adding simulation)
+            current_ev_marginals = current_ev_pmf.getMarginals(mc_samples=10000)  # (6, 253)
+            current_ev_means = np.array([
+                np.dot(np.arange(current_ev_marginals.shape[1]), current_ev_marginals[s])
+                for s in range(6)
+            ])
+            
+            # Get marginals for simulated EV gains
+            sim_ev_marginals = post_ev_sim.getMarginals(mc_samples=10000)  # (6, 253)
+            sim_ev_means = np.array([
+                np.dot(np.arange(sim_ev_marginals.shape[1]), sim_ev_marginals[s])
+                for s in range(6)
+            ])
+            
+            print(f"\n  EV Statistics for Regimen {regimen_idx+1} (levels {regimen_start_level}-{regimen_end_level}):")
+            print(f"  {'Stat':<12} | {'Current EV':>12} | {'Simulated Gain':>15} | {'Expected Sum':>13}")
+            print(f"  {'-'*12}-+-{'-'*12}-+-{'-'*15}-+-{'-'*13}")
+            for s in range(6):
+                # Only show non-zero values
+                if current_ev_means[s] > 0.01 or sim_ev_means[s] > 0.01:
+                    expected_sum = current_ev_means[s] + sim_ev_means[s]
+                    print(f"  {stat_names[s]:<12} | {current_ev_means[s]:>12.2f} | {sim_ev_means[s]:>15.2f} | {expected_sum:>13.2f}")
+        
         # Optional: plot EV gains from simulation (EV only, no IV change yet)
         if debug_plots:
             plot_marginals(
@@ -603,6 +630,25 @@ def track_training_stats(
         # Update EV prior by combining with simulation result
         from bayesian_model import update_ev_pmf
         current_ev_pmf = update_ev_pmf(current_ev_pmf, post_ev_sim, mode="linear")
+        
+        # Verbose: Show actual EV after combining (verify additivity)
+        if verbose:
+            # Get marginals for updated EV PMF (after combination)
+            updated_ev_marginals = current_ev_pmf.getMarginals(mc_samples=10000)  # (6, 253)
+            updated_ev_means = np.array([
+                np.dot(np.arange(updated_ev_marginals.shape[1]), updated_ev_marginals[s])
+                for s in range(6)
+            ])
+            
+            print(f"  {'Stat':<12} | {'Actual After':>13} | {'Difference':>11}")
+            print(f"  {'-'*12}-+-{'-'*13}-+-{'-'*11}")
+            for s in range(6):
+                # Only show non-zero values
+                if current_ev_means[s] > 0.01 or sim_ev_means[s] > 0.01:
+                    expected_sum = current_ev_means[s] + sim_ev_means[s]
+                    difference = updated_ev_means[s] - expected_sum
+                    print(f"  {stat_names[s]:<12} | {updated_ev_means[s]:>13.2f} | {difference:>11.2f}")
+            print()
         
         # Optional: plot updated EV PMF after combining with prior (EV only, IV still unchanged)
         if debug_plots:
