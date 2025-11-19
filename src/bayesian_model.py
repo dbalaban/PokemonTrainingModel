@@ -20,41 +20,99 @@ def nature_to_multipliers(nature: Nature) -> np.ndarray:
 
 def update_ev_pmf(prior: EV_PMF, upd: EV_PMF, mode: str = "linear") -> EV_PMF:
     """
-    Update EV PMF:
-      - T: discrete convolution (totals add)
-      - alpha: weighted combination of Dirichlet concentration parameters
-    mode: "linear" or "geometric"
+    Update EV PMF by combining prior and update distributions.
+    
+    This function is mode-agnostic and handles both 'dirichlet' and 'histogram' modes:
+      - Dirichlet mode: Convolves T distributions and combines alpha parameters
+      - Histogram mode: Convolves independent histograms for each stat
+    
+    Parameters
+    ----------
+    prior : EV_PMF
+        Prior EV distribution
+    upd : EV_PMF
+        Update (increment) EV distribution to add to prior
+    mode : str
+        Combination mode for Dirichlet alpha parameters: "linear" or "geometric"
+        (Only used in dirichlet mode)
+    
+    Returns
+    -------
+    EV_PMF
+        Updated EV distribution with the same mode as the prior
+        
+    Notes
+    -----
+    Both prior and upd must have the same mode. The returned PMF will have the same
+    mode as the inputs.
     """
-    # ---- 1) Update T via convolution ----
-    # Convolve prior and update total EV distributions.
-    # Truncate at max_total_ev: any mass that would push total beyond max_total_ev
-    # is dropped (not folded into the final bin). This is intentional because
-    # totals > max_total_ev are infeasible states and should have probability 0.
-    new_T = np.convolve(prior.T, upd.T)[:prior.max_total_ev + 1]
-    s = new_T.sum()
-    # Renormalize after truncation to account for dropped overflow mass
-    new_T = new_T / s if s > 0 else prior.T.copy()
+    # Ensure both PMFs have the same mode
+    if prior.mode != upd.mode:
+        raise ValueError(f"Cannot update EV_PMF with different modes: prior={prior.mode}, upd={upd.mode}")
+    
+    # Handle based on mode
+    if prior.mode == 'dirichlet':
+        # ---- Dirichlet mode: convolve T and combine alpha ----
+        
+        # ---- 1) Update T via convolution ----
+        # Convolve prior and update total EV distributions.
+        # Truncate at max_total_ev: any mass that would push total beyond max_total_ev
+        # is dropped (not folded into the final bin). This is intentional because
+        # totals > max_total_ev are infeasible states and should have probability 0.
+        new_T = np.convolve(prior.T, upd.T)[:prior.max_total_ev + 1]
+        s = new_T.sum()
+        # Renormalize after truncation to account for dropped overflow mass
+        new_T = new_T / s if s > 0 else prior.T.copy()
 
-    # ---- 2) Update alpha using expected totals as masses ----
-    tvals_prior = np.arange(prior.max_total_ev + 1, dtype=float)
-    tvals_upd   = np.arange(upd.max_total_ev   + 1, dtype=float)
-    m_prior = float((tvals_prior * prior.T).sum())
-    m_upd   = float((tvals_upd   * upd.T  ).sum())
-    denom = m_prior + m_upd
+        # ---- 2) Update alpha using expected totals as masses ----
+        tvals_prior = np.arange(prior.max_total_ev + 1, dtype=float)
+        tvals_upd   = np.arange(upd.max_total_ev   + 1, dtype=float)
+        m_prior = float((tvals_prior * prior.T).sum())
+        m_upd   = float((tvals_upd   * upd.T  ).sum())
+        denom = m_prior + m_upd
 
-    if denom <= 0:
-        new_alpha = prior.alpha.copy()
-    else:
-        if mode == "linear":
-            new_alpha = (m_prior * prior.alpha + m_upd * upd.alpha) / denom
-        elif mode == "geometric":
-            # Geometric mean in log space
-            log_alpha = m_prior * np.log(prior.alpha) + m_upd * np.log(upd.alpha)
-            new_alpha = np.exp(log_alpha / denom)
+        if denom <= 0:
+            new_alpha = prior.alpha.copy()
         else:
-            raise ValueError("mode must be 'linear' or 'geometric'")
+            if mode == "linear":
+                new_alpha = (m_prior * prior.alpha + m_upd * upd.alpha) / denom
+            elif mode == "geometric":
+                # Geometric mean in log space
+                log_alpha = m_prior * np.log(prior.alpha) + m_upd * np.log(upd.alpha)
+                new_alpha = np.exp(log_alpha / denom)
+            else:
+                raise ValueError("mode must be 'linear' or 'geometric'")
 
-    return EV_PMF(priorT=new_T, alpha=new_alpha)
+        return EV_PMF(priorT=new_T, alpha=new_alpha, mode='dirichlet', rng=prior.rng)
+    
+    elif prior.mode == 'histogram':
+        # ---- Histogram mode: convolve independent histograms ----
+        
+        # For each stat, convolve the histograms independently
+        # This represents adding EVs: if prior has EV_i and upd adds EV_j, result is EV_i + EV_j
+        max_ev = prior.max_ev
+        new_histograms = np.zeros((6, max_ev + 1), dtype=float)
+        
+        for s in range(6):
+            # Convolve the two histograms for this stat
+            conv_result = np.convolve(prior.histograms[s], upd.histograms[s])
+            
+            # Truncate at max_ev: values beyond max_ev are capped
+            # Take only the first max_ev+1 values
+            conv_result = conv_result[:max_ev + 1]
+            
+            # Renormalize (some mass may have been lost due to truncation)
+            total_mass = conv_result.sum()
+            if total_mass > 0:
+                new_histograms[s] = conv_result / total_mass
+            else:
+                # Fallback: keep prior if convolution resulted in zero mass
+                new_histograms[s] = prior.histograms[s].copy()
+        
+        return EV_PMF(mode='histogram', histograms=new_histograms, rng=prior.rng)
+    
+    else:
+        raise ValueError(f"Unknown EV_PMF mode: {prior.mode}")
 
 # Use centralized helper for StatBlock ↔ array conversion
 _sb_to_arr = statblock_to_array
@@ -166,7 +224,17 @@ def hybrid_ev_iv_update(
     Hybrid alternating update (no corners):
       1) IV update by exact inversion + weighting with current EV marginals.
       2) EV update by importance sampling constrained by current IV posterior.
+    
+    Note: This method currently only supports EV_PMF in 'dirichlet' mode.
+    For 'histogram' mode, use 'analytic' update method instead.
     """
+    # Check mode compatibility
+    if prior_ev.mode != 'dirichlet':
+        raise ValueError(
+            f"hybrid_ev_iv_update only supports EV_PMF in 'dirichlet' mode. "
+            f"Current mode: '{prior_ev.mode}'. "
+            f"Consider using 'analytic' update method instead."
+        )
     ev_post = prior_ev
     iv_post = IV_PMF(prior=prior_iv.P, rng=prior_ev.rng)
 
@@ -377,6 +445,9 @@ def analytic_update_with_observation(
     """
     One-shot update using IV-only sampling + analytic EV feasibility,
     with batched importance sampling and proper correction for q(IV,EV).
+    
+    Mode compatibility: This method supports both 'dirichlet' and 'histogram' modes.
+    The returned EV_PMF will preserve the mode of the input prior_ev.
 
     Interpretation of M
     -------------------
@@ -550,8 +621,9 @@ def analytic_update_with_observation(
 
     # ----- 5) re-build PMFs from weighted particles -----
     # EV_all.T and IV_all.T are (N_valid, 6)
-    new_ev_pmf = EV_PMF.from_samples(EV_all.T, weights=w)
-    new_iv_pmf = IV_PMF.from_samples(IV_all.T, weights=w)
+    # Preserve the mode of the input prior
+    new_ev_pmf = EV_PMF.from_samples(EV_all.T, weights=w, mode=prior_ev.mode, rng=prior_ev.rng)
+    new_iv_pmf = IV_PMF.from_samples(IV_all.T, weights=w, rng=prior_ev.rng)
 
     return new_ev_pmf, new_iv_pmf
 
@@ -571,7 +643,17 @@ def update_with_observation(
     """
     One-shot importance update with proposal q(EV,IV) = prior_ev × prior_iv.
     Uses Dirichlet-Multinomial sampling.
+    
+    Note: This method currently only supports EV_PMF in 'dirichlet' mode.
+    For 'histogram' mode, use 'analytic' update method instead.
     """
+    # Check mode compatibility
+    if prior_ev.mode != 'dirichlet':
+        raise ValueError(
+            f"update_with_observation only supports EV_PMF in 'dirichlet' mode. "
+            f"Current mode: '{prior_ev.mode}'. "
+            f"Consider using 'analytic' update method instead."
+        )
     obs = _sb_to_arr(obs_stats)
 
     # ----- sample EV from prior_ev via Dirichlet-Multinomial -----

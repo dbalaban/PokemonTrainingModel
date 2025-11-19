@@ -30,6 +30,10 @@ def apply_ev_smoothing(ev_pmf: EV_PMF, smoothing_alpha: float = 0.0, smoothing_T
     """
     Apply smoothing to an EV_PMF by mixing with a wider distribution.
     
+    This function is mode-agnostic and handles both 'dirichlet' and 'histogram' modes:
+      - Dirichlet mode: Smooths alpha and T parameters
+      - Histogram mode: Smooths independent histograms via Gaussian blur
+    
     This function can help handle minor data inconsistencies by widening
     the EV distribution, making it less concentrated and more robust to
     observation noise.
@@ -39,12 +43,16 @@ def apply_ev_smoothing(ev_pmf: EV_PMF, smoothing_alpha: float = 0.0, smoothing_T
     ev_pmf : EV_PMF
         The original EV PMF
     smoothing_alpha : float, optional
-        Smoothing strength for the Dirichlet concentration parameter (default: 0.0)
+        Smoothing strength parameter (default: 0.0)
+        - In dirichlet mode: smooths Dirichlet concentration parameter
+        - In histogram mode: controls Gaussian blur width
         - 0.0 = no smoothing (use original)
-        - 1.0 = full smoothing (uniform concentration)
-        Higher values make the proportions more uniform across stats
+        - 1.0 = full smoothing
+        Higher values make the distributions wider/less concentrated
     smoothing_T : float, optional
         Smoothing strength for the total EV distribution (default: 0.0)
+        - In dirichlet mode: smooths total EV distribution
+        - In histogram mode: additional global smoothing
         - 0.0 = no smoothing (use original)
         - 1.0 = full smoothing (wide uniform)
         Higher values widen the total EV distribution
@@ -52,7 +60,7 @@ def apply_ev_smoothing(ev_pmf: EV_PMF, smoothing_alpha: float = 0.0, smoothing_T
     Returns
     -------
     EV_PMF
-        Smoothed EV PMF
+        Smoothed EV PMF with the same mode as input
         
     Notes
     -----
@@ -67,36 +75,86 @@ def apply_ev_smoothing(ev_pmf: EV_PMF, smoothing_alpha: float = 0.0, smoothing_T
     if smoothing_alpha == 0.0 and smoothing_T == 0.0:
         return ev_pmf
     
-    # Smooth alpha (concentration parameters)
-    if smoothing_alpha > 0:
-        # Mix current alpha with uniform concentration
-        uniform_alpha = np.ones(6, dtype=float)
-        new_alpha = (1 - smoothing_alpha) * ev_pmf.alpha + smoothing_alpha * uniform_alpha
-    else:
-        new_alpha = ev_pmf.alpha.copy()
-    
-    # Smooth T (total EV distribution)
-    if smoothing_T > 0:
-        # Create a wider distribution by mixing with a uniform around the expected total
-        current_T = ev_pmf.T.copy()
-        # Expected total
-        exp_total = float(np.dot(np.arange(len(current_T)), current_T))
-        # Create a uniform distribution around the expected total
-        width = int(smoothing_T * 50)  # Width proportional to smoothing
-        if width > 0:
-            uniform_T = np.zeros_like(current_T)
-            lo = max(0, int(exp_total - width))
-            hi = min(len(current_T) - 1, int(exp_total + width))
-            uniform_T[lo:hi+1] = 1.0 / (hi - lo + 1)
-            # Mix
-            new_T = (1 - smoothing_T) * current_T + smoothing_T * uniform_T
-            new_T = new_T / new_T.sum()  # Renormalize
+    if ev_pmf.mode == 'dirichlet':
+        # ---- Dirichlet mode: smooth alpha and T ----
+        
+        # Smooth alpha (concentration parameters)
+        if smoothing_alpha > 0:
+            # Mix current alpha with uniform concentration
+            uniform_alpha = np.ones(6, dtype=float)
+            new_alpha = (1 - smoothing_alpha) * ev_pmf.alpha + smoothing_alpha * uniform_alpha
         else:
-            new_T = current_T
-    else:
-        new_T = ev_pmf.T.copy()
+            new_alpha = ev_pmf.alpha.copy()
+        
+        # Smooth T (total EV distribution)
+        if smoothing_T > 0:
+            # Create a wider distribution by mixing with a uniform around the expected total
+            current_T = ev_pmf.T.copy()
+            # Expected total
+            exp_total = float(np.dot(np.arange(len(current_T)), current_T))
+            # Create a uniform distribution around the expected total
+            width = int(smoothing_T * 50)  # Width proportional to smoothing
+            if width > 0:
+                uniform_T = np.zeros_like(current_T)
+                lo = max(0, int(exp_total - width))
+                hi = min(len(current_T) - 1, int(exp_total + width))
+                uniform_T[lo:hi+1] = 1.0 / (hi - lo + 1)
+                # Mix
+                new_T = (1 - smoothing_T) * current_T + smoothing_T * uniform_T
+                new_T = new_T / new_T.sum()  # Renormalize
+            else:
+                new_T = current_T
+        else:
+            new_T = ev_pmf.T.copy()
+        
+        return EV_PMF(priorT=new_T, alpha=new_alpha, mode='dirichlet', rng=ev_pmf.rng)
     
-    return EV_PMF(priorT=new_T, alpha=new_alpha, rng=ev_pmf.rng)
+    elif ev_pmf.mode == 'histogram':
+        # ---- Histogram mode: apply Gaussian smoothing to histograms ----
+        
+        if smoothing_alpha == 0.0 and smoothing_T == 0.0:
+            return ev_pmf
+        
+        # Combine smoothing parameters for histogram mode
+        smoothing_strength = max(smoothing_alpha, smoothing_T)
+        
+        if smoothing_strength == 0.0:
+            return ev_pmf
+        
+        # Apply Gaussian blur to each histogram
+        max_ev = ev_pmf.max_ev
+        new_histograms = np.zeros((6, max_ev + 1), dtype=float)
+        
+        # Gaussian kernel width based on smoothing strength
+        sigma = smoothing_strength * 10.0  # Scale to reasonable width
+        
+        if sigma < 0.1:
+            # Too small to matter, return original
+            return ev_pmf
+        
+        # Create Gaussian kernel
+        kernel_width = int(np.ceil(3 * sigma))
+        kernel_size = 2 * kernel_width + 1
+        x = np.arange(-kernel_width, kernel_width + 1, dtype=float)
+        kernel = np.exp(-0.5 * (x / sigma) ** 2)
+        kernel = kernel / kernel.sum()  # Normalize
+        
+        for s in range(6):
+            # Convolve with Gaussian kernel
+            smoothed = np.convolve(ev_pmf.histograms[s], kernel, mode='same')
+            
+            # Ensure non-negative and normalize
+            smoothed = np.maximum(smoothed, 0.0)
+            total = smoothed.sum()
+            if total > 0:
+                new_histograms[s] = smoothed / total
+            else:
+                new_histograms[s] = ev_pmf.histograms[s].copy()
+        
+        return EV_PMF(mode='histogram', histograms=new_histograms, rng=ev_pmf.rng)
+    
+    else:
+        raise ValueError(f"Unknown EV_PMF mode: {ev_pmf.mode}")
 
 
 def split_regimen_at_levels(
@@ -413,6 +471,7 @@ def track_training_stats(
     smoothing_alpha: float = 0.0,
     smoothing_T: float = 0.0,
     update_method: str = 'analytic',
+    ev_mode: str = 'dirichlet',
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
     Track Pokemon stats through a training regimen with observations.
@@ -452,6 +511,11 @@ def track_training_stats(
         EV PMF total smoothing parameter (0.0=no smoothing, 1.0=full) (default: 0.0)
     update_method : str
         Update method to use: 'analytic', 'hybrid', or 'simple' (default: 'analytic')
+        Note: 'hybrid' and 'simple' only support 'dirichlet' mode
+    ev_mode : str
+        EV_PMF mode: 'dirichlet' or 'histogram' (default: 'dirichlet')
+        - 'dirichlet': Dirichlet + total EV model (preserves correlations)
+        - 'histogram': Independent histograms (better preserves distribution shapes)
         
     Returns
     -------
@@ -462,7 +526,14 @@ def track_training_stats(
     ------
     ValueError
         If observation levels are outside the regimen's level range or not strictly increasing
+        If update_method is incompatible with ev_mode
     """
+    # Validate mode compatibility with update method
+    if ev_mode == 'histogram' and update_method in ['hybrid', 'simple']:
+        raise ValueError(
+            f"Update method '{update_method}' only supports 'dirichlet' mode. "
+            f"For 'histogram' mode, use 'analytic' update method."
+        )
     # 1. Sort observations by level
     sorted_obs = sorted(observations, key=lambda obs: obs.level)
     
@@ -505,21 +576,29 @@ def track_training_stats(
     # IV prior: uniform over all 6 stats and 32 IV values
     iv_prior = IV_PMF(prior=None)  # None means uniform
     
-    # EV prior: no training yet (P(T=0) = 1)
-    # Create a delta distribution at T=0
-    max_total_ev = 510
-    priorT = np.zeros(max_total_ev + 1, dtype=float)
-    priorT[0] = 1.0  # All mass at T=0
-    
-    # For T=0, any alpha is consistent (use uniform Dirichlet)
-    alpha = np.ones(6, dtype=float)
-    
-    ev_prior = EV_PMF(priorT=priorT, alpha=alpha)
+    # EV prior: no training yet (all EVs at 0)
+    if ev_mode == 'dirichlet':
+        # Dirichlet mode: P(T=0) = 1
+        max_total_ev = 510
+        priorT = np.zeros(max_total_ev + 1, dtype=float)
+        priorT[0] = 1.0  # All mass at T=0
+        
+        # For T=0, any alpha is consistent (use uniform Dirichlet)
+        alpha = np.ones(6, dtype=float)
+        
+        ev_prior = EV_PMF(priorT=priorT, alpha=alpha, mode='dirichlet')
+    else:  # histogram mode
+        # Histogram mode: all histograms have mass at EV=0
+        max_ev = 252
+        histograms = np.zeros((6, max_ev + 1), dtype=float)
+        histograms[:, 0] = 1.0  # All mass at EV=0 for each stat
+        
+        ev_prior = EV_PMF(mode='histogram', histograms=histograms)
     
     if verbose:
         print("\nInitialized priors:")
         print("  IV: uniform distribution over [0, 31] for each stat")
-        print("  EV: delta at zero (no training yet)")
+        print(f"  EV: delta at zero (no training yet), mode={ev_mode}")
     
     # 5. Create a mapping from level to observations
     obs_by_level = {}
@@ -584,8 +663,8 @@ def track_training_stats(
         num_trials = M
         simulator.run_simulation(num_trials=num_trials, exp_start=species_info.exp_to_level(regimen_start_level))
         
-        # Convert samples to EV_PMF
-        post_ev_sim = simulator.toPMF(allocator="round")
+        # Convert samples to EV_PMF (match mode of current EV PMF)
+        post_ev_sim = simulator.toPMF(allocator="round", mode=current_ev_pmf.mode)
         
         # Verbose: Show EV statistics before and after combining
         if verbose:
