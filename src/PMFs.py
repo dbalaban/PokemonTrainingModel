@@ -264,7 +264,7 @@ class EV_PMF:
         rng: np.random.Generator | None = None,
         *,
         allocator: str = "round",   # 'multinomial' | 'round'
-        mode: str = "dirichlet",   # 'dirichlet' | 'histogram'
+        mode: str = "histogram",   # 'dirichlet' | 'histogram'
         histograms: np.ndarray | None = None,  # (6, MAX_EV+1) for histogram mode
     ):
         self.n_stats = 6
