@@ -160,7 +160,7 @@ def main():
                         help='EV PMF total smoothing parameter (0.0=no smoothing, 0.5=moderate, 1.0=full) (default: 0.0)')
     parser.add_argument('--update-method', type=str, default='analytic',
                         choices=['analytic', 'hybrid', 'simple'],
-                        help='Update method to use (default: analytic)')
+                        help='Update method to use (default: analytic). Note: analytic may hang with data inconsistencies; use hybrid with smoothing for robustness.')
     args = parser.parse_args()
 
     # Define observed stats at levels 12, 19, 20
