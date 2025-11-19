@@ -26,6 +26,79 @@ from regimen_sim import RegimenSimulator
 from bayesian_model import analytic_update_with_observation
 
 
+def apply_ev_smoothing(ev_pmf: EV_PMF, smoothing_alpha: float = 0.0, smoothing_T: float = 0.0) -> EV_PMF:
+    """
+    Apply smoothing to an EV_PMF by mixing with a wider distribution.
+    
+    This function can help handle minor data inconsistencies by widening
+    the EV distribution, making it less concentrated and more robust to
+    observation noise.
+    
+    Parameters
+    ----------
+    ev_pmf : EV_PMF
+        The original EV PMF
+    smoothing_alpha : float, optional
+        Smoothing strength for the Dirichlet concentration parameter (default: 0.0)
+        - 0.0 = no smoothing (use original)
+        - 1.0 = full smoothing (uniform concentration)
+        Higher values make the proportions more uniform across stats
+    smoothing_T : float, optional
+        Smoothing strength for the total EV distribution (default: 0.0)
+        - 0.0 = no smoothing (use original)
+        - 1.0 = full smoothing (wide uniform)
+        Higher values widen the total EV distribution
+        
+    Returns
+    -------
+    EV_PMF
+        Smoothed EV PMF
+        
+    Notes
+    -----
+    Smoothing is useful when:
+    - Observations have minor measurement errors
+    - Training regimen is approximate (not all encounters recorded)
+    - Some flexibility is needed in the inference
+    
+    However, smoothing cannot fix fundamental data inconsistencies where
+    observed stats are incompatible with the training regimen.
+    """
+    if smoothing_alpha == 0.0 and smoothing_T == 0.0:
+        return ev_pmf
+    
+    # Smooth alpha (concentration parameters)
+    if smoothing_alpha > 0:
+        # Mix current alpha with uniform concentration
+        uniform_alpha = np.ones(6, dtype=float)
+        new_alpha = (1 - smoothing_alpha) * ev_pmf.alpha + smoothing_alpha * uniform_alpha
+    else:
+        new_alpha = ev_pmf.alpha.copy()
+    
+    # Smooth T (total EV distribution)
+    if smoothing_T > 0:
+        # Create a wider distribution by mixing with a uniform around the expected total
+        current_T = ev_pmf.T.copy()
+        # Expected total
+        exp_total = float(np.dot(np.arange(len(current_T)), current_T))
+        # Create a uniform distribution around the expected total
+        width = int(smoothing_T * 50)  # Width proportional to smoothing
+        if width > 0:
+            uniform_T = np.zeros_like(current_T)
+            lo = max(0, int(exp_total - width))
+            hi = min(len(current_T) - 1, int(exp_total + width))
+            uniform_T[lo:hi+1] = 1.0 / (hi - lo + 1)
+            # Mix
+            new_T = (1 - smoothing_T) * current_T + smoothing_T * uniform_T
+            new_T = new_T / new_T.sum()  # Renormalize
+        else:
+            new_T = current_T
+    else:
+        new_T = ev_pmf.T.copy()
+    
+    return EV_PMF(priorT=new_T, alpha=new_alpha, rng=ev_pmf.rng)
+
+
 def split_regimen_at_levels(
     regimen: TrainingRegimen,
     levels: List[int],
@@ -337,6 +410,9 @@ def track_training_stats(
     M: int = 20000,
     verbose: bool = False,
     debug_plots: bool = False,
+    smoothing_alpha: float = 0.0,
+    smoothing_T: float = 0.0,
+    update_method: str = 'analytic',
 ) -> Tuple[EV_PMF, IV_PMF]:
     """
     Track Pokemon stats through a training regimen with observations.
@@ -347,7 +423,7 @@ def track_training_stats(
     3. Initializing uniform IV prior and zero-EV prior
     4. Iteratively:
        - Running RegimenSimulator over each block
-       - Applying analytic_update_with_observation at observation levels
+       - Applying Bayesian update at observation levels
     5. Returning final posterior EV_PMF and IV_PMF
     
     Parameters
@@ -370,6 +446,12 @@ def track_training_stats(
         Whether to print detailed progress information (default: False)
     debug_plots : bool
         Whether to generate matplotlib plots after each observation (default: False)
+    smoothing_alpha : float
+        EV PMF alpha smoothing parameter (0.0=no smoothing, 1.0=full) (default: 0.0)
+    smoothing_T : float
+        EV PMF total smoothing parameter (0.0=no smoothing, 1.0=full) (default: 0.0)
+    update_method : str
+        Update method to use: 'analytic', 'hybrid', or 'simple' (default: 'analytic')
         
     Returns
     -------
@@ -553,18 +635,58 @@ def track_training_stats(
                 if verbose:
                     print(f"\n  Applying observation {obs_idx+1}/{len(obs_list)} at level {regimen_end_level}")
                     print(f"  Observed stats: {obs.stats}")
+                    if smoothing_alpha > 0 or smoothing_T > 0:
+                        print(f"  Smoothing parameters: alpha={smoothing_alpha}, T={smoothing_T}")
+                    print(f"  Update method: {update_method}")
                 
-                # Apply analytic update
-                current_ev_pmf, current_iv_pmf = analytic_update_with_observation(
-                    prior_ev=current_ev_pmf,
-                    prior_iv=current_iv_pmf,
-                    obs_stats=obs.stats,
-                    level=obs.level,
-                    base_stats=base_stats,
-                    nature=nature,
-                    M=M,
-                    verbose=verbose,
-                )
+                # Apply smoothing before update if requested
+                if smoothing_alpha > 0 or smoothing_T > 0:
+                    current_ev_pmf = apply_ev_smoothing(current_ev_pmf, smoothing_alpha, smoothing_T)
+                    if verbose:
+                        print(f"  Applied EV smoothing")
+                
+                # Apply update based on selected method
+                if update_method == 'analytic':
+                    from bayesian_model import analytic_update_with_observation
+                    current_ev_pmf, current_iv_pmf = analytic_update_with_observation(
+                        prior_ev=current_ev_pmf,
+                        prior_iv=current_iv_pmf,
+                        obs_stats=obs.stats,
+                        level=obs.level,
+                        base_stats=base_stats,
+                        nature=nature,
+                        M=M,
+                        verbose=verbose,
+                    )
+                elif update_method == 'hybrid':
+                    from bayesian_model import hybrid_ev_iv_update
+                    current_ev_pmf, current_iv_pmf = hybrid_ev_iv_update(
+                        prior_ev=current_ev_pmf,
+                        prior_iv=current_iv_pmf,
+                        obs_stats=obs.stats,
+                        level=obs.level,
+                        base_stats=base_stats,
+                        nature=nature,
+                        mc_particles=M,
+                        tol=0,
+                        max_iters=5,
+                        verbose=verbose,
+                    )
+                elif update_method == 'simple':
+                    from bayesian_model import update_with_observation
+                    current_ev_pmf, current_iv_pmf = update_with_observation(
+                        prior_ev=current_ev_pmf,
+                        prior_iv=current_iv_pmf,
+                        obs_stats=obs.stats,
+                        level=obs.level,
+                        base_stats=base_stats,
+                        nature=nature,
+                        M=M,
+                        tol=0,
+                        verbose=verbose,
+                    )
+                else:
+                    raise ValueError(f"Unknown update method: {update_method}")
                 
                 if verbose:
                     print(f"  Completed Bayesian update for observation at level {regimen_end_level}")
